@@ -1,16 +1,22 @@
 INSTRUCTIONS
 
-🤖 Bot Commands To Set »
+Main commands:
+- `/start` - check if the bot is online
+- `/settings` - edit upload, video, and CloudConvert settings
+- `/status` - live task dashboard
+- `/setname` - custom filename
+- `/zipaswd` - archive password
+- `/unzipaswd` - extract password
+- `/help` - usage details
 
-start -  Check if I am Online 📲
-tupload - Upload files to telegram 🏎️
-gdupload - Upload files to google drive ☁️
-drupload - Upload files from a local directory / folder 📂
-ytupload - Upload ytdl link files 🐞
-settings - Edit Bot Settings ⚙
-setname - Set Custom File Name 📛
-zipaswd - Set Password for Archiving 🔐
-unzipaswd - Set Password for Extracting Archives 🔓
-help - Get details about how to use Me 🧐
+Link actions:
+- Normal download/upload
+- Zip / Extract / UnDoubleZip
+- Stream extractor
+- CloudConvert Convert / Resize / Compress
 
-⚠️ NOTE: Bot will only work in private chat
+Colab launcher:
+- Fill `API_ID`, `API_HASH`, `BOT_TOKEN`, `USER_ID`
+- Add `CC_API_KEY` if you want CloudConvert features
+
+NOTE: the bot works in private chat only.

@@ -12,6 +12,10 @@ class BOT:
         convert_quality = "Low"
         caption = "Monospace"
         split_video = "Split Videos"
+        cc_engine_mode = "Balanced CPU"
+        cc_quality_profile = "Balanced"
+        cc_resize = "720p"
+        cc_target_size = "100 MB"
         prefix = ""
         suffix = ""
         thumbnail = False
@@ -23,6 +27,10 @@ class BOT:
         is_split = True
         caption = "code"
         video_out = "mp4"
+        cc_engine_mode = "balanced"
+        cc_quality_profile = "balanced"
+        cc_resize = 720
+        cc_target_size_mb = 100
         custom_name = ""
         zip_pswd = ""
         unzip_pswd = ""
@@ -81,6 +89,7 @@ class Paths:
     mirror_dir = f"{MOUNTED_DRIVE}/MyDrive/Colab Leecher Uploads"
     temp_zpath = f"{WORK_PATH}/Leeched_Files"
     temp_unzip_path = f"{WORK_PATH}/Unzipped_Files"
+    temp_cc_path = f"{WORK_PATH}/CloudConvert_Files"
     temp_files_dir = f"{WORK_PATH}/leech_temp"
     thumbnail_ytdl = f"{WORK_PATH}/ytdl_thumbnails"
     access_token = "/content/token.pickle"

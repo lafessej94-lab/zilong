@@ -13,7 +13,7 @@ from colab_leecher.utility.helper import (
     is_mega, is_terabox, is_torrent,
 )
 from colab_leecher.utility.handler import (
-    Leech, Unzip_Handler, Zip_Handler, SendLogs, cancelTask,
+    CloudConvert_Handler, Leech, Unzip_Handler, Zip_Handler, SendLogs, cancelTask,
 )
 from colab_leecher.utility.variables import (
     BOT, MSG, BotTimes, Messages, Paths, Aria2c, Transfer, TaskError,
@@ -32,6 +32,7 @@ async def taskScheduler():
     is_dualzip = BOT.Mode.type == "undzip"
     is_unzip   = BOT.Mode.type == "unzip"
     is_zip     = BOT.Mode.type == "zip"
+    is_cc      = BOT.Mode.type in {"cc_convert", "cc_resize", "cc_compress"}
     is_dir     = BOT.Mode.mode == "dir-leech"
 
     # Reset
@@ -126,6 +127,8 @@ async def Do_Leech(source, is_dir, is_ytdl, is_zip, is_unzip, is_dualzip):
             await Unzip_Handler(Paths.down_path, True)
             await Zip_Handler(Paths.temp_unzip_path, True, True)
             await Leech(Paths.temp_zpath, True)
+        elif is_cc:
+            await CloudConvert_Handler(Paths.down_path, True)
         else:
             await Leech(Paths.down_path, True)
 

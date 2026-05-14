@@ -94,8 +94,8 @@ async def on_output(output: str):
     except Exception as do:
         logging.error(f"Could't Get Info Due to: {do}")
 
-    percentage = re.findall("\d+\.\d+|\d+", progress_percentage)[0]
-    down = re.findall("\d+\.\d+|\d+", downloaded_bytes)[0]
+    percentage = re.findall(r"\d+\.\d+|\d+", progress_percentage)[0]
+    down = re.findall(r"\d+\.\d+|\d+", downloaded_bytes)[0]
     down_unit = re.findall("[a-zA-Z]+", downloaded_bytes)[0]
     if "G" in down_unit:
         spd = 3

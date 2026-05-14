@@ -7,7 +7,8 @@ from asyncio import sleep, get_event_loop
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from colab_leecher import colab_bot, OWNER
+from colab_leecher import CC_API_KEY, colab_bot, OWNER
+from colab_leecher.cloudconvert import cc_mode_label, quality_label, resize_label
 from colab_leecher.utility.handler import cancelTask
 from colab_leecher.utility.variables import (
     BOT, MSG, BotTimes, Paths, Messages, ProcessTracker, TaskInfo,
@@ -41,6 +42,7 @@ async def start(client, message):
         "Send a <b>link</b>, <b>magnet</b> or <b>path</b>.\n\n"
         "📥 Direct links · Magnet · GDrive\n"
         "🎬 YouTube · Mega · Terabox\n"
+        "☁️ CloudConvert convert · resize · compress\n"
         "🎞 Stream Extractor (any link)\n"
         "📊 /status — live dashboard\n"
         "📡 /nyaa_search — anime search\n\n"
@@ -89,6 +91,7 @@ async def help_cmd(client, message):
         "  <code>[name.ext]</code>  — custom filename\n"
         "  <code>{pass}</code>     — zip password\n"
         "  <code>(pass)</code>     — unzip password\n\n"
+        "☁️ <b>CloudConvert</b> — use CC Convert / Resize / Compress buttons\n"
         "🎞 <b>Stream Extractor</b> — tap 🎞 Streams on any link\n"
         "🖼 Send a <b>photo</b> to set thumbnail"
     )
@@ -373,7 +376,10 @@ def _mode_keyboard():
          InlineKeyboardButton("🗜 Compress",    callback_data="zip")],
         [InlineKeyboardButton("📂 Extract",     callback_data="unzip"),
          InlineKeyboardButton("♻️ UnDoubleZip", callback_data="undzip")],
-        [InlineKeyboardButton("🎞 Streams",     callback_data="sx_open")],
+        [InlineKeyboardButton("☁️ CC Convert",  callback_data="cc_convert"),
+         InlineKeyboardButton("📐 CC Resize",   callback_data="cc_resize")],
+        [InlineKeyboardButton("🧱 CC Compress", callback_data="cc_compress"),
+         InlineKeyboardButton("🎞 Streams",     callback_data="sx_open")],
     ])
 
 
@@ -524,7 +530,10 @@ async def callbacks(client, cq):
         return
 
     # ── Task launch ────────────────────────────
-    if data in ["normal", "zip", "unzip", "undzip"]:
+    if data in ["normal", "zip", "unzip", "undzip", "cc_convert", "cc_resize", "cc_compress"]:
+        if data.startswith("cc_") and not CC_API_KEY.strip():
+            await cq.answer("CloudConvert API key is missing in your Colab launcher.", show_alert=True)
+            return
         BOT.Mode.type = data
         await cq.message.delete()
         MSG.status_msg = await colab_bot.send_message(
@@ -691,6 +700,23 @@ async def callbacks(client, cq):
                  InlineKeyboardButton("📉 Low",     callback_data="q-Low")],
                 [InlineKeyboardButton("⏎ Back",     callback_data="back")],
             ]))
+    elif data == "cc":
+        cc_ready = "Ready" if CC_API_KEY.strip() else "Missing"
+        await cq.message.edit_text(
+            "☁️ <b>CLOUDCONVERT SETTINGS</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"API Key  <code>{cc_ready}</code>\n"
+            f"Mode     <code>{cc_mode_label(BOT.Options.cc_engine_mode)}</code>\n"
+            f"Preset   <code>{quality_label(BOT.Options.cc_quality_profile)}</code>\n"
+            f"Resize   <code>{resize_label(BOT.Options.cc_resize)}</code>\n"
+            f"Target   <code>{BOT.Setting.cc_target_size}</code>\n\n"
+            "These settings are used by CC Convert, CC Resize, and CC Compress.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚖️ CC Mode", callback_data="cc-mode"),
+                 InlineKeyboardButton("🎚 Preset", callback_data="cc-quality")],
+                [InlineKeyboardButton("📐 Resize", callback_data="cc-resize"),
+                 InlineKeyboardButton("🗜 Target", callback_data="cc-target")],
+                [InlineKeyboardButton("⏮ Back", callback_data="back")],
+            ]))
     elif data == "caption":
         await cq.message.edit_text(
             f"✏️ <b>CAPTION STYLE</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -737,6 +763,38 @@ async def callbacks(client, cq):
         elif data == "q-High": BOT.Setting.convert_quality = "High"; BOT.Options.convert_quality = True
         elif data == "q-Low":  BOT.Setting.convert_quality = "Low";  BOT.Options.convert_quality = False
         else: BOT.Options.video_out = data
+        await send_settings(client, cq.message, cq.message.id, False)
+    elif data == "cc-mode":
+        cycle = ["balanced", "economy"]
+        cur = str(BOT.Options.cc_engine_mode or "balanced").lower()
+        nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else "balanced"
+        BOT.Options.cc_engine_mode = nxt
+        BOT.Setting.cc_engine_mode = cc_mode_label(nxt)
+        await cq.answer(BOT.Setting.cc_engine_mode, show_alert=True)
+        await send_settings(client, cq.message, cq.message.id, False)
+    elif data == "cc-quality":
+        cycle = ["fast", "balanced", "small", "best"]
+        cur = str(BOT.Options.cc_quality_profile or "balanced").lower()
+        nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else "balanced"
+        BOT.Options.cc_quality_profile = nxt
+        BOT.Setting.cc_quality_profile = quality_label(nxt)
+        await cq.answer(BOT.Setting.cc_quality_profile, show_alert=True)
+        await send_settings(client, cq.message, cq.message.id, False)
+    elif data == "cc-resize":
+        cycle = [0, 480, 720, 1080]
+        cur = int(BOT.Options.cc_resize or 0)
+        nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else 720
+        BOT.Options.cc_resize = nxt
+        BOT.Setting.cc_resize = resize_label(nxt)
+        await cq.answer(BOT.Setting.cc_resize, show_alert=True)
+        await send_settings(client, cq.message, cq.message.id, False)
+    elif data == "cc-target":
+        cycle = [50, 100, 200, 500]
+        cur = int(BOT.Options.cc_target_size_mb or 100)
+        nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else 100
+        BOT.Options.cc_target_size_mb = nxt
+        BOT.Setting.cc_target_size = f"{nxt} MB"
+        await cq.answer(BOT.Setting.cc_target_size, show_alert=True)
         await send_settings(client, cq.message, cq.message.id, False)
     elif data in ["media","document"]:
         BOT.Options.stream_upload = data == "media"

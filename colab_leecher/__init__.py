@@ -40,6 +40,7 @@ API_HASH = str(credentials["API_HASH"])
 BOT_TOKEN = str(credentials["BOT_TOKEN"])
 OWNER = int(credentials["USER_ID"])
 DUMP_ID = str(credentials["DUMP_ID"])
+CC_API_KEY = str(credentials.get("CC_API_KEY", "") or "")
 
 log.info("Credentials loaded successfully")
 

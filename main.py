@@ -5,6 +5,7 @@ API_HASH  = ""   # @param {type: "string"}
 BOT_TOKEN = ""  # @param {type: "string"}
 USER_ID   = 0                           # @param {type: "integer"}
 DUMP_ID   = 0                                     # @param {type: "integer"} — unused, keep as 0
+CC_API_KEY = ""  # @param {type: "string"}
 
 import subprocess, time, json, shutil, os
 from IPython.display import clear_output
@@ -55,6 +56,7 @@ credentials = {
     "BOT_TOKEN": BOT_TOKEN,
     "USER_ID":   USER_ID,
     "DUMP_ID":   DUMP_ID,
+    "CC_API_KEY": CC_API_KEY,
 }
 
 with open('/content/zilong/credentials.json', 'w') as f:
@@ -67,4 +69,4 @@ if os.path.exists("/content/zilong/my_bot.session"):
 
 print("\rStarting Bot....")
 
-!cd /content/zilong && python3 -m colab_leecher
+subprocess.run("cd /content/zilong && python3 -m colab_leecher", shell=True)
