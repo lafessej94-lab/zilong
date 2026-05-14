@@ -199,8 +199,8 @@ def _render_detail(key, idx, r, page):
     rows = [
         [InlineKeyboardButton("🧲 Magnet",        callback_data=f"nys|m|{key}|{idx}"),
          InlineKeyboardButton("📥 .torrent",      callback_data=f"nys|t|{key}|{idx}")],
-        [InlineKeyboardButton("☁️ Seedr+Hardsub", callback_data=f"nys|sr|{key}|{idx}"),
-         InlineKeyboardButton("☁️ Seedr+CC 🗜",   callback_data=f"nys|sc|{key}|{idx}")],
+        [InlineKeyboardButton("☁️ Seedr+CC Hardsub", callback_data=f"nys|sr|{key}|{idx}"),
+         InlineKeyboardButton("☁️ Seedr+CC Convert", callback_data=f"nys|sc|{key}|{idx}")],
         [InlineKeyboardButton("📥 Local DL",      callback_data=f"nys|dl|{key}|{idx}")],
         [InlineKeyboardButton("🔙 Back",          callback_data=f"nys|p|{key}|{page}")],
     ]
@@ -219,7 +219,7 @@ async def cmd_nyaa_search(client, message):
             "📡 <b>Nyaa Search</b>\n\n"
             "Usage: <code>/nyaa_search Kujima Utaeba</code>\n\n"
             "10 results per page with magnet, torrent,\n"
-            "Seedr+Hardsub and Seedr+CC Compress buttons."
+            "Seedr+CC Hardsub and Seedr+CC Convert buttons."
         )
     st = await message.reply_text(f"🔍 Searching: <code>{query[:40]}</code>…")
     results = await search_nyaa(query)
@@ -304,28 +304,37 @@ async def nys_cb(client, cq):
 
     if action == "sr":
         if not magnet: return await client.send_message(uid, "❌ No magnet.")
-        await client.send_message(
-            uid,
-            f"☁️ <b>Seedr+Hardsub</b>\n\n"
-            f"📦 <code>{r.title[:50]}</code>\n\n"
-            f"🧲 <code>{magnet[:80]}…</code>\n\n"
-            f"<i>Paste this magnet in the bot to use Seedr pipeline\n"
-            f"(the full Seedr+Hardsub workflow from Zilong Multiusage).</i>"
+        from colab_leecher.utility.variables import BOT
+        BOT.SOURCE = [magnet]
+        BOT.Mode.ytdl = False
+        BOT.Mode.mode = "leech"
+        BOT.State.started = True
+        await cq.message.edit_text(
+            f"☁️ <b>Seedr+CC Hardsub Ready</b>\n\n"
+            f"<code>{r.title[:55]}</code>\n\n"
+            "Use the button below to start the Seedr download, French subtitle extraction, and CloudConvert hardsub pipeline.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶ Start Seedr+CC Hardsub", callback_data="seedr_cc_hardsub")],
+                [InlineKeyboardButton("🔙 Back", callback_data=f"nys|a|{key}|{idx}")],
+            ]),
         )
         return
 
     if action == "sc":
         if not magnet: return await client.send_message(uid, "❌ No magnet.")
-        await client.send_message(
-            uid,
-            f"☁️ <b>Seedr + CloudConvert Compress</b>\n\n"
-            f"📦 <code>{r.title[:50]}</code>\n\n"
-            f"🧲 <code>{magnet[:80]}…</code>\n\n"
-            f"<b>Why Seedr+CC Compress?</b>\n"
-            f"Seedr downloads at datacenter speed → CC re-encodes\n"
-            f"to target resolution/size → auto-uploads to Telegram.\n\n"
-            f"<i>Available in Zilong Multiusage (full version).\n"
-            f"Use /nyaa_search in Multiusage for the full pipeline.</i>"
+        from colab_leecher.utility.variables import BOT
+        BOT.SOURCE = [magnet]
+        BOT.Mode.ytdl = False
+        BOT.Mode.mode = "leech"
+        BOT.State.started = True
+        await cq.message.edit_text(
+            f"☁️ <b>Seedr+CC Convert Ready</b>\n\n"
+            f"<code>{r.title[:55]}</code>\n\n"
+            "This path lets Seedr fetch the torrent first, then CloudConvert transcodes the remote video before Telegram upload.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶ Start Seedr+CC Convert", callback_data="seedr_cc_convert")],
+                [InlineKeyboardButton("🔙 Back", callback_data=f"nys|a|{key}|{idx}")],
+            ]),
         )
         return
 

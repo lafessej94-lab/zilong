@@ -2,6 +2,7 @@
 import json
 import logging
 import asyncio
+import os
 from pathlib import Path
 
 from uvloop import install
@@ -41,6 +42,18 @@ BOT_TOKEN = str(credentials["BOT_TOKEN"])
 OWNER = int(credentials["USER_ID"])
 DUMP_ID = str(credentials["DUMP_ID"])
 CC_API_KEY = str(credentials.get("CC_API_KEY", "") or "")
+SEEDR_USERNAME = str(credentials.get("SEEDR_USERNAME", "") or "")
+SEEDR_PASSWORD = str(credentials.get("SEEDR_PASSWORD", "") or "")
+SEEDR_PROXY = str(credentials.get("SEEDR_PROXY", "") or "")
+
+if CC_API_KEY:
+    os.environ.setdefault("CC_API_KEY", CC_API_KEY)
+if SEEDR_USERNAME:
+    os.environ.setdefault("SEEDR_USERNAME", SEEDR_USERNAME)
+if SEEDR_PASSWORD:
+    os.environ.setdefault("SEEDR_PASSWORD", SEEDR_PASSWORD)
+if SEEDR_PROXY:
+    os.environ.setdefault("SEEDR_PROXY", SEEDR_PROXY)
 
 log.info("Credentials loaded successfully")
 

@@ -6,6 +6,9 @@ BOT_TOKEN = ""  # @param {type: "string"}
 USER_ID   = 0                           # @param {type: "integer"}
 DUMP_ID   = 0                                     # @param {type: "integer"} — unused, keep as 0
 CC_API_KEY = ""  # @param {type: "string"}
+SEEDR_USERNAME = ""  # @param {type: "string"}
+SEEDR_PASSWORD = ""  # @param {type: "string"}
+SEEDR_PROXY = ""  # @param {type: "string"}
 
 import subprocess, time, json, shutil, os
 from IPython.display import clear_output
@@ -57,6 +60,9 @@ credentials = {
     "USER_ID":   USER_ID,
     "DUMP_ID":   DUMP_ID,
     "CC_API_KEY": CC_API_KEY,
+    "SEEDR_USERNAME": SEEDR_USERNAME,
+    "SEEDR_PASSWORD": SEEDR_PASSWORD,
+    "SEEDR_PROXY": SEEDR_PROXY,
 }
 
 with open('/content/zilong/credentials.json', 'w') as f:

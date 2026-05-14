@@ -12,7 +12,9 @@ psutil
 pytz
 pyrofork==2.2.11
 requests
+seedrcc
 tgcrypto
+httpx
 uvloop
 yt_dlp
 pymegatools

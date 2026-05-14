@@ -13,7 +13,7 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 from pyrogram.errors import BadRequest
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 
-from colab_leecher import CC_API_KEY, colab_bot
+from colab_leecher import CC_API_KEY, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot
 from colab_leecher.cloudconvert import cc_mode_label, quality_label, resize_label
 from colab_leecher.utility.variables import BOT, MSG, BotTimes, Messages, Paths
 
@@ -354,6 +354,7 @@ async def send_settings(client, message, msg_id, command: bool):
     su = "-" if BOT.Setting.suffix == "" else f"<<{BOT.Setting.suffix}>>"
     thmb = "✅ Set" if BOT.Setting.thumbnail else "❌ None"
     cc_ready = "✅ Ready" if CC_API_KEY else "❌ Missing"
+    seedr_ready = "✅ Ready" if str(SEEDR_USERNAME or "").strip() and str(SEEDR_PASSWORD or "").strip() else "❌ Missing"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(up_toggle, callback_data=up_mode),
@@ -377,6 +378,7 @@ async def send_settings(client, message, msg_id, command: bool):
         f"📐  CC Resize <code>{resize_label(BOT.Options.cc_resize)}</code>\n"
         f"🗜  CC Target <code>{BOT.Setting.cc_target_size}</code>\n"
         f"🔑  CC API    <code>{cc_ready}</code>\n"
+        f"🧲  Seedr     <code>{seedr_ready}</code>\n"
         f"✏️  Caption   <code>{BOT.Setting.caption}</code>\n"
         f"⬅️  Prefix    <code>{pr}</code>\n"
         f"➡️  Suffix    <code>{su}</code>\n"

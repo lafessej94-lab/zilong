@@ -7,9 +7,13 @@ from asyncio import sleep, get_event_loop
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from colab_leecher import CC_API_KEY, colab_bot, OWNER
+from colab_leecher import CC_API_KEY, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot, OWNER
 from colab_leecher.cloudconvert import cc_mode_label, quality_label, resize_label
-from colab_leecher.utility.handler import cancelTask
+from colab_leecher.utility.handler import (
+    Seedr_CC_Convert_Handler,
+    Seedr_CC_Hardsub_Handler,
+    cancelTask,
+)
 from colab_leecher.utility.variables import (
     BOT, MSG, BotTimes, Paths, Messages, ProcessTracker, TaskInfo,
 )
@@ -43,6 +47,7 @@ async def start(client, message):
         "📥 Direct links · Magnet · GDrive\n"
         "🎬 YouTube · Mega · Terabox\n"
         "☁️ CloudConvert convert · resize · compress\n"
+        "🧲 Seedr + CloudConvert convert · hardsub\n"
         "🎞 Stream Extractor (any link)\n"
         "📊 /status — live dashboard\n"
         "📡 /nyaa_search — anime search\n\n"
@@ -92,6 +97,7 @@ async def help_cmd(client, message):
         "  <code>{pass}</code>     — zip password\n"
         "  <code>(pass)</code>     — unzip password\n\n"
         "☁️ <b>CloudConvert</b> — use CC Convert / Resize / Compress buttons\n"
+        "🧲 <b>Seedr + CC</b> — on magnet links, use Seedr+CC Convert / Hardsub\n"
         "🎞 <b>Stream Extractor</b> — tap 🎞 Streams on any link\n"
         "🖼 Send a <b>photo</b> to set thumbnail"
     )
@@ -371,7 +377,7 @@ async def setFix(client, message):
 # ══════════════════════════════════════════════
 
 def _mode_keyboard():
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("📄 Normal",      callback_data="normal"),
          InlineKeyboardButton("🗜 Compress",    callback_data="zip")],
         [InlineKeyboardButton("📂 Extract",     callback_data="unzip"),
@@ -380,7 +386,14 @@ def _mode_keyboard():
          InlineKeyboardButton("📐 CC Resize",   callback_data="cc_resize")],
         [InlineKeyboardButton("🧱 CC Compress", callback_data="cc_compress"),
          InlineKeyboardButton("🎞 Streams",     callback_data="sx_open")],
-    ])
+    ]
+    first = (BOT.SOURCE or [""])[0].strip()
+    if first.startswith("magnet:?xt=urn:btih:"):
+        rows.append([
+            InlineKeyboardButton("☁️ Seedr+CC Convert", callback_data="seedr_cc_convert"),
+            InlineKeyboardButton("☁️ Seedr+CC Hardsub", callback_data="seedr_cc_hardsub"),
+        ])
+    return InlineKeyboardMarkup(rows)
 
 
 @colab_bot.on_message(filters.create(isLink) & ~filters.photo & filters.private)
@@ -549,6 +562,43 @@ async def callbacks(client, cq):
         TaskInfo.reset()
         TaskInfo.set(phase="download", started_at=datetime.now().timestamp())
         BOT.TASK = get_event_loop().create_task(taskScheduler())
+        await BOT.TASK
+        BOT.State.task_going = False
+        TaskInfo.reset()
+        return
+
+    if data in ["seedr_cc_convert", "seedr_cc_hardsub"]:
+        if not CC_API_KEY.strip():
+            await cq.answer("CloudConvert API key is missing in your Colab launcher.", show_alert=True)
+            return
+        if not str(SEEDR_USERNAME or "").strip() or not str(SEEDR_PASSWORD or "").strip():
+            await cq.answer("Seedr credentials are missing in your Colab launcher.", show_alert=True)
+            return
+        magnet = (BOT.SOURCE or [""])[0].strip()
+        if not magnet.startswith("magnet:?xt=urn:btih:"):
+            await cq.answer("Seedr mode currently needs a magnet link.", show_alert=True)
+            return
+
+        await cq.message.delete()
+        MSG.status_msg = await colab_bot.send_message(
+            chat_id=OWNER,
+            text="⏳ <i>Starting Seedr job...</i>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⛔ Cancel", callback_data="cancel"),
+                InlineKeyboardButton("📊 Status", callback_data="status_refresh"),
+            ]]),
+        )
+        BOT.State.task_going = True
+        BOT.State.started = False
+        BotTimes.start_time = datetime.now()
+        TaskInfo.reset()
+        TaskInfo.set(phase="process", engine="Seedr+CloudConvert", started_at=datetime.now().timestamp())
+        if data == "seedr_cc_convert":
+            BOT.Mode.type = data
+            BOT.TASK = get_event_loop().create_task(Seedr_CC_Convert_Handler(magnet))
+        else:
+            BOT.Mode.type = data
+            BOT.TASK = get_event_loop().create_task(Seedr_CC_Hardsub_Handler(magnet))
         await BOT.TASK
         BOT.State.task_going = False
         TaskInfo.reset()

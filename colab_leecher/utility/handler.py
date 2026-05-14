@@ -1,10 +1,12 @@
+import asyncio
+import json
 import os
 import shutil
 import logging
 import pathlib
 from asyncio import sleep
 from time import time
-from colab_leecher import OWNER, CC_API_KEY, colab_bot
+from colab_leecher import OWNER, CC_API_KEY, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot
 from natsort import natsorted
 from datetime import datetime
 from os import makedirs, path as ospath
@@ -12,10 +14,13 @@ from colab_leecher.cloudconvert import (
     cc_mode_label,
     compress_file,
     convert_file,
+    convert_remote_url,
+    hardsub_remote_url,
     quality_label,
     resize_file,
     resize_label,
 )
+from colab_leecher.seedr import SeedrError, _del_folder, fetch_urls_via_seedr
 from colab_leecher.uploader.telegram import upload_file
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from colab_leecher.utility.variables import (
@@ -229,6 +234,279 @@ async def CloudConvert_Handler(folder_path: str, remove: bool):
     await Leech(Paths.temp_cc_path, True, convert_videos=False)
     if remove and ospath.exists(folder_path):
         shutil.rmtree(folder_path)
+
+
+def _seedr_ready() -> bool:
+    return bool((SEEDR_USERNAME or os.environ.get("SEEDR_USERNAME", "")).strip()) and bool(
+        (SEEDR_PASSWORD or os.environ.get("SEEDR_PASSWORD", "")).strip()
+    )
+
+
+def _seedr_video_files(files: list[dict]) -> list[dict]:
+    videos = [f for f in files if fileType(f.get("name", "")) == "video" and f.get("url")]
+    return sorted(videos, key=lambda item: int(item.get("size", 0) or 0), reverse=True)
+
+
+async def _run_tracked_process(args: list[str], label: str) -> tuple[str, str]:
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    ProcessTracker.register(proc.pid, label)
+    try:
+        stdout, stderr = await proc.communicate()
+    finally:
+        ProcessTracker.unregister(proc.pid)
+    out = stdout.decode("utf-8", errors="replace")
+    err = stderr.decode("utf-8", errors="replace")
+    if proc.returncode != 0:
+        detail = err.strip() or out.strip() or f"{label} failed with code {proc.returncode}"
+        raise RuntimeError(detail)
+    return out, err
+
+
+async def _seedr_status(kind: str, stage: str, pct: float, detail: str, filename: str = "") -> None:
+    pct = max(0.0, min(float(pct), 100.0))
+    TaskInfo.set(
+        phase="process",
+        engine="Seedr+CloudConvert",
+        filename=filename or TaskInfo.filename or Messages.download_name,
+        percentage=pct,
+        speed=detail,
+        eta="-",
+    )
+    text = (
+        f"☁️ <b>{kind}</b>\n\n"
+        f"<code>{filename or Messages.download_name or 'Seedr job'}</code>\n\n"
+        f"<b>Stage</b>  <code>{stage}</code>\n"
+        f"<b>Progress</b>  <code>{pct:.1f}%</code>\n"
+        f"<b>Mode</b>  <code>{cc_mode_label(BOT.Options.cc_engine_mode)}</code>\n"
+        f"<b>Preset</b>  <code>{quality_label(BOT.Options.cc_quality_profile)}</code>\n"
+        f"<b>Detail</b>  <code>{detail}</code>"
+    )
+    try:
+        await MSG.status_msg.edit_text(
+            text=Messages.task_msg + text + sysINFO(),
+            reply_markup=keyboard(),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        pass
+
+
+async def _probe_remote_video(url: str) -> dict:
+    out, _ = await _run_tracked_process(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-show_format",
+            url,
+        ],
+        "ffprobe",
+    )
+    return json.loads(out or "{}")
+
+
+def _pick_french_text_subtitle(info: dict) -> dict | None:
+    allowed = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
+    best = None
+    best_score = -1
+    for stream in info.get("streams") or []:
+        if str(stream.get("codec_type") or "").lower() != "subtitle":
+            continue
+        codec = str(stream.get("codec_name") or "").lower()
+        if codec not in allowed:
+            continue
+        tags = {str(k).lower(): str(v).lower() for k, v in (stream.get("tags") or {}).items()}
+        lang = tags.get("language", "")
+        title = " ".join(filter(None, [tags.get("title", ""), tags.get("handler_name", "")]))
+        score = 0
+        if lang in {"fr", "fra", "fre"}:
+            score += 100
+        elif "fr" in lang or "french" in lang:
+            score += 70
+        if "vostfr" in title:
+            score += 40
+        if "french" in title or "francais" in title or "français" in title:
+            score += 30
+        if "full" in title:
+            score += 5
+        if "forced" in title:
+            score += 3
+        if score > best_score:
+            best = stream
+            best_score = score
+    return best if best_score > 0 else None
+
+
+async def _extract_subtitle_from_url(video_url: str, stream: dict, dest_dir: str, stem: str) -> str:
+    os.makedirs(dest_dir, exist_ok=True)
+    codec = str(stream.get("codec_name") or "").lower()
+    ext = ".ass" if codec in {"ass", "ssa"} else ".srt"
+    out_path = ospath.join(dest_dir, f"{stem}.fr{ext}")
+    sub_codec = "ass" if ext == ".ass" else "srt"
+    stream_index = int(stream.get("index"))
+    await _run_tracked_process(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_url,
+            "-map",
+            f"0:{stream_index}",
+            "-c:s",
+            sub_codec,
+            out_path,
+        ],
+        "ffmpeg-subtitle",
+    )
+    if not ospath.exists(out_path) or ospath.getsize(out_path) == 0:
+        raise RuntimeError("Subtitle extraction produced an empty file.")
+    return out_path
+
+
+async def Seedr_CC_Convert_Handler(magnet: str) -> None:
+    if not _seedr_ready():
+        await cancelTask("Seedr credentials are missing in your Colab launcher.")
+        return
+    if not CC_API_KEY.strip():
+        await cancelTask("CloudConvert API key is missing in your Colab launcher.")
+        return
+
+    if ospath.exists(Paths.temp_cc_path):
+        shutil.rmtree(Paths.temp_cc_path)
+    makedirs(Paths.temp_cc_path)
+
+    folder_id = None
+    seedr_user = seedr_pwd = ""
+    try:
+        await _seedr_status("Seedr + CloudConvert Convert", "Seedr", 0.0, "Preparing Seedr job")
+
+        async def _seedr_cb(stage: str, pct: float, detail: str) -> None:
+            await _seedr_status("Seedr + CloudConvert Convert", f"Seedr/{stage}", pct * 0.35, detail)
+
+        files, folder_id, seedr_user, seedr_pwd = await fetch_urls_via_seedr(magnet, progress_cb=_seedr_cb)
+        videos = _seedr_video_files(files)
+        if not videos:
+            raise SeedrError("Seedr completed, but no video file was found in the torrent.")
+
+        total = len(videos)
+        for idx, video in enumerate(videos):
+            name = video["name"]
+            chunk_start = 35.0 + ((idx / total) * 50.0)
+            chunk_end = 35.0 + (((idx + 1) / total) * 50.0)
+
+            async def _process_cb(pct: float, detail: str, filename: str = name) -> None:
+                overall = chunk_start + ((chunk_end - chunk_start) * max(0.0, min(pct, 100.0)) / 100.0)
+                await _seedr_status("Seedr + CloudConvert Convert", "CloudConvert", overall, detail, filename)
+
+            async def _download_cb(pct: float, detail: str, filename: str = name) -> None:
+                overall = 85.0 + ((idx + (max(0.0, min(pct, 100.0)) / 100.0)) / total * 15.0)
+                await _seedr_status("Seedr + CloudConvert Convert", "Download", overall, detail, filename)
+
+            await _seedr_status("Seedr + CloudConvert Convert", "Queue", chunk_start, "Submitting CloudConvert job", name)
+            await convert_remote_url(
+                CC_API_KEY,
+                video["url"],
+                name,
+                Paths.temp_cc_path,
+                output_ext=BOT.Options.video_out,
+                scale_height=0,
+                cc_mode=BOT.Options.cc_engine_mode,
+                quality_profile=BOT.Options.cc_quality_profile,
+                process_cb=_process_cb,
+                download_cb=_download_cb,
+            )
+
+        await _seedr_status("Seedr + CloudConvert Convert", "Upload", 100.0, "Uploading to Telegram")
+        await Leech(Paths.temp_cc_path, True, convert_videos=False)
+    except Exception as exc:
+        await cancelTask(f"Seedr+CC convert failed\n\n{exc}")
+    finally:
+        if folder_id and seedr_user and seedr_pwd:
+            await _del_folder(seedr_user, seedr_pwd, folder_id)
+
+
+async def Seedr_CC_Hardsub_Handler(magnet: str) -> None:
+    if not _seedr_ready():
+        await cancelTask("Seedr credentials are missing in your Colab launcher.")
+        return
+    if not CC_API_KEY.strip():
+        await cancelTask("CloudConvert API key is missing in your Colab launcher.")
+        return
+
+    if ospath.exists(Paths.temp_cc_path):
+        shutil.rmtree(Paths.temp_cc_path)
+    makedirs(Paths.temp_cc_path)
+
+    subtitle_dir = ospath.join(Paths.WORK_PATH, "seedr_subtitles")
+    if ospath.exists(subtitle_dir):
+        shutil.rmtree(subtitle_dir)
+    makedirs(subtitle_dir)
+
+    folder_id = None
+    seedr_user = seedr_pwd = ""
+    try:
+        await _seedr_status("Seedr + CloudConvert Hardsub", "Seedr", 0.0, "Preparing Seedr job")
+
+        async def _seedr_cb(stage: str, pct: float, detail: str) -> None:
+            await _seedr_status("Seedr + CloudConvert Hardsub", f"Seedr/{stage}", pct * 0.30, detail)
+
+        files, folder_id, seedr_user, seedr_pwd = await fetch_urls_via_seedr(magnet, progress_cb=_seedr_cb)
+        videos = _seedr_video_files(files)
+        if not videos:
+            raise SeedrError("Seedr completed, but no video file was found in the torrent.")
+
+        total = len(videos)
+        for idx, video in enumerate(videos):
+            name = video["name"]
+            video_url = video["url"]
+            stem = ospath.splitext(ospath.basename(name))[0]
+            base_start = 30.0 + ((idx / total) * 55.0)
+            base_end = 30.0 + (((idx + 1) / total) * 55.0)
+
+            await _seedr_status("Seedr + CloudConvert Hardsub", "Probe", base_start, "Inspecting subtitle streams", name)
+            probe = await _probe_remote_video(video_url)
+            sub_stream = _pick_french_text_subtitle(probe)
+            if not sub_stream:
+                raise RuntimeError(f"No French text subtitle stream found in {name}")
+
+            await _seedr_status("Seedr + CloudConvert Hardsub", "Extract", base_start + 6.0, "Extracting French subtitles", name)
+            subtitle_path = await _extract_subtitle_from_url(video_url, sub_stream, subtitle_dir, stem)
+
+            async def _process_cb(pct: float, detail: str, filename: str = name) -> None:
+                overall = (base_start + 10.0) + ((base_end - (base_start + 10.0)) * max(0.0, min(pct, 100.0)) / 100.0)
+                await _seedr_status("Seedr + CloudConvert Hardsub", "CloudConvert", overall, detail, filename)
+
+            async def _download_cb(pct: float, detail: str, filename: str = name) -> None:
+                overall = 85.0 + ((idx + (max(0.0, min(pct, 100.0)) / 100.0)) / total * 15.0)
+                await _seedr_status("Seedr + CloudConvert Hardsub", "Download", overall, detail, filename)
+
+            await _seedr_status("Seedr + CloudConvert Hardsub", "Queue", base_start + 10.0, "Submitting CloudConvert hardsub job", name)
+            await hardsub_remote_url(
+                CC_API_KEY,
+                video_url,
+                name,
+                subtitle_path,
+                Paths.temp_cc_path,
+                cc_mode=BOT.Options.cc_engine_mode,
+                quality_profile=BOT.Options.cc_quality_profile,
+                process_cb=_process_cb,
+                download_cb=_download_cb,
+            )
+
+        await _seedr_status("Seedr + CloudConvert Hardsub", "Upload", 100.0, "Uploading to Telegram")
+        await Leech(Paths.temp_cc_path, True, convert_videos=False)
+    except Exception as exc:
+        await cancelTask(f"Seedr+CC hardsub failed\n\n{exc}")
+    finally:
+        if folder_id and seedr_user and seedr_pwd:
+            await _del_folder(seedr_user, seedr_pwd, folder_id)
 
 
 async def Zip_Handler(down_path: str, is_split: bool, remove: bool):

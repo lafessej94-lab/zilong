@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -344,6 +345,7 @@ def media_duration_seconds(path: str) -> float:
 async def _create_convert_job(
     api_key: str,
     *,
+    video_url: Optional[str] = None,
     video_filename: str,
     output_filename: str,
     crf: int,
@@ -363,7 +365,11 @@ async def _create_convert_job(
     payload = {
         "tag": "zilong-convert",
         "tasks": {
-            "import-video": {"operation": "import/upload"},
+            "import-video": (
+                {"operation": "import/url", "url": video_url, "filename": v_safe}
+                if video_url else
+                {"operation": "import/upload"}
+            ),
             "convert": {
                 "operation": "command",
                 "input": ["import-video"],
@@ -381,6 +387,7 @@ async def _create_convert_job(
 async def _create_compress_job(
     api_key: str,
     *,
+    video_url: Optional[str] = None,
     video_filename: str,
     output_filename: str,
     target_mb: float,
@@ -402,7 +409,11 @@ async def _create_compress_job(
     payload = {
         "tag": "zilong-compress",
         "tasks": {
-            "import-video": {"operation": "import/upload"},
+            "import-video": (
+                {"operation": "import/url", "url": video_url, "filename": v_safe}
+                if video_url else
+                {"operation": "import/upload"}
+            ),
             "compress": {
                 "operation": "command",
                 "input": ["import-video"],
@@ -412,6 +423,56 @@ async def _create_compress_job(
                 "capture_output": True,
             },
             "export": {"operation": "export/url", "input": ["compress"]},
+        },
+    }
+    return await _post_job(api_key, payload)
+
+
+async def _create_hardsub_job(
+    api_key: str,
+    *,
+    video_url: str,
+    video_filename: str,
+    subtitle_path: str,
+    subtitle_filename: str,
+    output_filename: str,
+    crf: int,
+    preset: str,
+) -> dict:
+    v_safe = _arg_safe(video_filename)
+    s_safe = _arg_safe(subtitle_filename)
+    o_safe = _arg_safe(output_filename)
+    with open(subtitle_path, "rb") as fh:
+        subtitle_b64 = base64.b64encode(fh.read()).decode("ascii")
+    sub_path_in_cc = f"/input/import-sub/{s_safe}"
+    escaped = sub_path_in_cc.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+    ext = os.path.splitext(subtitle_filename)[1].lower()
+    filter_name = "ass" if ext in {".ass", ".ssa"} else "subtitles"
+    vf = f"{filter_name}='{escaped}'"
+
+    ffmpeg_args = (
+        f"-i /input/import-video/{v_safe} "
+        f"-i /input/import-sub/{s_safe} "
+        f"-map 0:v:0 -map 0:a? "
+        f'-vf "{vf}" '
+        f"-c:v libx264 -crf {crf} -preset {preset} -threads 0 "
+        f"-c:a aac -b:a 128k -sn -movflags +faststart "
+        f"/output/{o_safe}"
+    )
+    payload = {
+        "tag": "zilong-hardsub",
+        "tasks": {
+            "import-video": {"operation": "import/url", "url": video_url, "filename": v_safe},
+            "import-sub": {"operation": "import/base64", "file": subtitle_b64, "filename": s_safe},
+            "hardsub": {
+                "operation": "command",
+                "input": ["import-video", "import-sub"],
+                "engine": "ffmpeg",
+                "command": "ffmpeg",
+                "arguments": ffmpeg_args,
+                "capture_output": True,
+            },
+            "export": {"operation": "export/url", "input": ["hardsub"]},
         },
     }
     return await _post_job(api_key, payload)
@@ -461,6 +522,7 @@ async def convert_file(
         output_path=output_path,
         create_job_cb=lambda key: _create_convert_job(
             key,
+            video_url=None,
             video_filename=os.path.basename(source_path),
             output_filename=output_name,
             crf=crf,
@@ -498,6 +560,7 @@ async def resize_file(
         output_path=output_path,
         create_job_cb=lambda key: _create_convert_job(
             key,
+            video_url=None,
             video_filename=os.path.basename(source_path),
             output_filename=output_name,
             crf=crf,
@@ -534,6 +597,7 @@ async def compress_file(
         output_path=output_path,
         create_job_cb=lambda key: _create_compress_job(
             key,
+            video_url=None,
             video_filename=os.path.basename(source_path),
             output_filename=output_name,
             target_mb=float(target_mb),
@@ -545,3 +609,76 @@ async def compress_file(
         process_cb=process_cb,
         download_cb=download_cb,
     )
+
+
+async def convert_remote_url(
+    api_keys: str,
+    video_url: str,
+    source_name: str,
+    dest_dir: str,
+    *,
+    output_ext: str = "mp4",
+    scale_height: int = 0,
+    cc_mode: str = "balanced",
+    quality_profile: str = "balanced",
+    process_cb: ProgressCB = None,
+    download_cb: ProgressCB = None,
+) -> str:
+    keys = parse_api_keys(api_keys)
+    api_key, _ = await pick_best_key(keys)
+    crf, preset = profile_options(quality_profile, cc_mode)
+    base = os.path.splitext(os.path.basename(source_name))[0]
+    if int(scale_height or 0) > 0:
+        output_name = f"{base}.{int(scale_height)}p.{output_ext.lstrip('.') or 'mp4'}"
+    else:
+        output_name = f"{base}.{output_ext.lstrip('.') or 'mp4'}"
+    output_path = os.path.join(dest_dir, output_name)
+    job = await _create_convert_job(
+        api_key,
+        video_url=video_url,
+        video_filename=os.path.basename(source_name),
+        output_filename=output_name,
+        crf=crf,
+        preset=preset,
+        scale_height=max(int(scale_height or 0), 0),
+    )
+    job = await _wait_for_job(api_key, job.get("id", "?"), process_cb)
+    url = _export_url(job)
+    if not url:
+        raise RuntimeError("CloudConvert finished without an export URL.")
+    return await _download_file(url, output_path, download_cb)
+
+
+async def hardsub_remote_url(
+    api_keys: str,
+    video_url: str,
+    source_name: str,
+    subtitle_path: str,
+    dest_dir: str,
+    *,
+    cc_mode: str = "balanced",
+    quality_profile: str = "balanced",
+    process_cb: ProgressCB = None,
+    download_cb: ProgressCB = None,
+) -> str:
+    keys = parse_api_keys(api_keys)
+    api_key, _ = await pick_best_key(keys)
+    crf, preset = profile_options(quality_profile, cc_mode)
+    base = os.path.splitext(os.path.basename(source_name))[0]
+    output_name = f"{base}.VOSTFR.mp4"
+    output_path = os.path.join(dest_dir, output_name)
+    job = await _create_hardsub_job(
+        api_key,
+        video_url=video_url,
+        video_filename=os.path.basename(source_name),
+        subtitle_path=subtitle_path,
+        subtitle_filename=os.path.basename(subtitle_path),
+        output_filename=output_name,
+        crf=crf,
+        preset=preset,
+    )
+    job = await _wait_for_job(api_key, job.get("id", "?"), process_cb)
+    url = _export_url(job)
+    if not url:
+        raise RuntimeError("CloudConvert finished without an export URL.")
+    return await _download_file(url, output_path, download_cb)
