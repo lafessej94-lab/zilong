@@ -10,7 +10,7 @@ SEEDR_USERNAME = ""  # @param {type: "string"}
 SEEDR_PASSWORD = ""  # @param {type: "string"}
 SEEDR_PROXY = ""  # @param {type: "string"}
 
-import subprocess, time, json, shutil, os
+import subprocess, time, json, shutil, os, sys
 from IPython.display import clear_output
 from threading import Thread
 
@@ -74,5 +74,32 @@ if os.path.exists("/content/zilong/my_bot.session"):
     os.remove("/content/zilong/my_bot.session")
 
 print("\rStarting Bot....")
+os.makedirs("/content/zilong/data", exist_ok=True)
+log_path = "/content/zilong/data/zilong.log"
+print(f"Live logs will stream below. File log: {log_path}")
 
-subprocess.run("cd /content/zilong && python3 -m colab_leecher", shell=True)
+proc = subprocess.Popen(
+    ["python3", "-m", "colab_leecher"],
+    cwd="/content/zilong",
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    encoding="utf-8",
+    errors="replace",
+    bufsize=1,
+)
+
+try:
+    while True:
+        line = proc.stdout.readline()
+        if line == "" and proc.poll() is not None:
+            break
+        if line:
+            print(line, end="")
+            sys.stdout.flush()
+finally:
+    if proc.stdout:
+        proc.stdout.close()
+
+return_code = proc.wait()
+print(f"\nBot process exited with code {return_code}")
