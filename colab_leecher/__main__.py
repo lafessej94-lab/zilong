@@ -136,6 +136,25 @@ def _probe_media_info(path: str) -> str:
     return "\n".join(lines[:12])
 
 
+async def _startup_welcome() -> None:
+    for _ in range(6):
+        try:
+            await sleep(2)
+            owner = await colab_bot.get_users(OWNER)
+            first = owner.first_name or owner.username or str(OWNER)
+            display = first.replace("<", "&lt;").replace(">", "&gt;")
+            text = (
+                f"👋 <b>Welcome back, {display}</b>\n"
+                "⚡ <b>Zilong is online</b>\n\n"
+                "Send a link, magnet, or path to begin.\n"
+                "Use /start for the full menu and /status for the live dashboard."
+            )
+            await colab_bot.send_message(chat_id=OWNER, text=text)
+            return
+        except Exception as exc:
+            logging.warning("Startup welcome attempt failed: %s", exc)
+
+
 def _owner(m): return m.chat.id == OWNER
 def _ring(p):  return "🟢" if p < 40 else ("🟡" if p < 70 else "🔴")
 
@@ -1049,4 +1068,5 @@ except Exception as e:
 
 
 logging.info("⚡ Zilong started.")
+get_event_loop().create_task(_startup_welcome())
 colab_bot.run()
