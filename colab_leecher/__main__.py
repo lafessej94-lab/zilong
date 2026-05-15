@@ -106,6 +106,24 @@ async def help_cmd(client, message):
     await message_deleter(message, msg)
 
 
+@colab_bot.on_message(filters.command("logs") & filters.private)
+async def logs_cmd(client, message):
+    if not _owner(message):
+        return
+    await message.delete()
+    if not os.path.exists(Paths.LOG_PATH):
+        await message.reply_text("❌ No log file found yet.")
+        return
+    try:
+        with open(Paths.LOG_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            tail = "".join(fh.readlines()[-80:]).strip()
+        if tail:
+            await message.reply_text(f"📜 <b>Recent Logs</b>\n\n<code>{tail[-3500:]}</code>")
+        await client.send_document(chat_id=OWNER, document=Paths.LOG_PATH, caption="Zilong runtime log")
+    except Exception as exc:
+        await message.reply_text(f"❌ Could not send logs: <code>{exc}</code>")
+
+
 # ══════════════════════════════════════════════
 #  /status — LIVE TASK DASHBOARD WITH CANCEL
 # ══════════════════════════════════════════════

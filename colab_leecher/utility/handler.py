@@ -35,6 +35,8 @@ from colab_leecher.utility.helper import (
 
 async def Leech(folder_path: str, remove: bool, convert_videos: bool = True):
     files = [str(p) for p in pathlib.Path(folder_path).glob("**/*") if p.is_file()]
+    if not files:
+        raise RuntimeError(f"No files were produced in {folder_path}.")
     for f in natsorted(files):
         fp = ospath.join(folder_path, f)
         if convert_videos and BOT.Options.convert_video and fileType(fp) == "video":
@@ -57,6 +59,8 @@ async def Leech(folder_path: str, remove: bool, convert_videos: bool = True):
             upload_queue.append(("single", file_path))
 
     total_uploads    = len(upload_queue)
+    if total_uploads == 0:
+        raise RuntimeError("Nothing to upload after processing.")
     split_cleaned    = False
 
     for idx, (kind, file_path) in enumerate(upload_queue):
@@ -255,7 +259,10 @@ async def _run_tracked_process(args: list[str], label: str) -> tuple[str, str]:
     )
     ProcessTracker.register(proc.pid, label)
     try:
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        raise RuntimeError(f"{label} timed out after 1800 seconds") from exc
     finally:
         ProcessTracker.unregister(proc.pid)
     out = stdout.decode("utf-8", errors="replace")
@@ -264,6 +271,17 @@ async def _run_tracked_process(args: list[str], label: str) -> tuple[str, str]:
         detail = err.strip() or out.strip() or f"{label} failed with code {proc.returncode}"
         raise RuntimeError(detail)
     return out, err
+
+
+def _tail_log(lines: int = 80) -> str:
+    try:
+        if not ospath.exists(Paths.LOG_PATH):
+            return ""
+        with open(Paths.LOG_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            chunk = fh.readlines()[-lines:]
+        return "".join(chunk).strip()
+    except Exception:
+        return ""
 
 
 async def _seedr_status(kind: str, stage: str, pct: float, detail: str, filename: str = "") -> None:
@@ -627,5 +645,93 @@ def _kill_stray_processes():
 
 async def SendLogs(is_leech: bool):
     BOT.State.started    = False
+    BOT.State.task_going = False
+    TaskInfo.reset()
+
+
+def _kill_stray_processes():
+    import subprocess
+
+    for name in ("aria2c", "ffmpeg", "ffprobe"):
+        try:
+            subprocess.run(["pkill", "-f", name], capture_output=True, timeout=5)
+        except Exception:
+            pass
+
+
+async def cancelTask(reason: str):
+    spent = getTime((datetime.now() - BotTimes.start_time).seconds)
+    killed = ProcessTracker.kill_all()
+
+    if BOT.State.task_going:
+        try:
+            if BOT.TASK and not BOT.TASK.done():
+                BOT.TASK.cancel()
+        except Exception as exc:
+            logging.warning("Task cancel: %s", exc)
+
+    _kill_stray_processes()
+
+    try:
+        if ospath.exists(Paths.WORK_PATH):
+            shutil.rmtree(Paths.WORK_PATH)
+    except Exception as exc:
+        logging.warning("Cancel cleanup: %s", exc)
+
+    BOT.State.task_going = False
+    TaskInfo.reset()
+
+    text = (
+        "⛔ <b>TASK CANCELLED</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"❓  <b>Reason</b>   <i>{reason}</i>\n"
+        f"⏱  <b>Spent</b>    <code>{spent}</code>\n"
+        f"💀  <b>Killed</b>   <code>{killed} process(es)</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>All downloads, uploads and processing stopped.</i>"
+    )
+    log_tail = _tail_log(60)
+
+    try:
+        await MSG.status_msg.edit_text(text)
+    except Exception:
+        try:
+            await colab_bot.send_message(chat_id=OWNER, text=text)
+        except Exception:
+            pass
+
+    if log_tail and "Cancelled by user" not in reason and "Cancelled via" not in reason:
+        try:
+            await colab_bot.send_message(
+                chat_id=OWNER,
+                text="📜 <b>Recent Log Tail</b>\n\n<code>" + log_tail[-3500:] + "</code>",
+            )
+        except Exception:
+            pass
+
+    logging.info("[Cancel] Task cancelled: %s - killed %s procs", reason, killed)
+
+
+async def SendLogs(is_leech: bool):
+    spent = getTime((datetime.now() - BotTimes.start_time).seconds)
+    summary = (
+        "✅ <b>TASK COMPLETED</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⏱  <b>Spent</b>  <code>{spent}</code>\n"
+        f"📤  <b>Files</b>  <code>{len(Transfer.sent_file_names)}</code>\n"
+        f"💾  <b>Total</b>  <code>{sizeUnit(Transfer.total_down_size)}</code>\n"
+    )
+    if Transfer.sent_file_names:
+        recent = "\n".join(f"· <code>{name}</code>" for name in Transfer.sent_file_names[-5:])
+        summary += f"\n<b>Recent files</b>\n{recent}"
+    if _tail_log(10):
+        summary += "\n\n📜 <b>Need details?</b> Use <code>/logs</code>"
+
+    try:
+        await colab_bot.send_message(chat_id=OWNER, text=summary)
+    except Exception:
+        pass
+
+    BOT.State.started = False
     BOT.State.task_going = False
     TaskInfo.reset()

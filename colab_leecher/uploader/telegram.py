@@ -117,4 +117,5 @@ async def upload_file(file_path, real_name, is_last: bool = False):
         await upload_file(file_path, real_name, is_last)
 
     except Exception as e:
-        logging.error(f"Upload error: {e}")
+        logging.exception(f"Upload error: {e}")
+        raise RuntimeError(f"Telegram upload failed for {real_name}: {e}") from e

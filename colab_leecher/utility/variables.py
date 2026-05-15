@@ -77,6 +77,8 @@ class BotTimes:
 
 class Paths:
     BASE_DIR = "/content/zilong"
+    DATA_DIR = f"{BASE_DIR}/data"
+    LOG_PATH = f"{DATA_DIR}/zilong.log"
     WORK_PATH = f"{BASE_DIR}/BOT_WORK"
     THMB_PATH = f"{BASE_DIR}/colab_leecher/Thumbnail.jpg"
     VIDEO_FRAME = f"{WORK_PATH}/video_frame.jpg"

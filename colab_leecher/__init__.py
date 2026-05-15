@@ -8,13 +8,30 @@ from pathlib import Path
 from uvloop import install
 from pyrogram.client import Client
 
-log = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
-)
-
 CREDENTIALS_PATH = Path("/content/zilong/credentials.json")
+LOG_DIR = Path("/content/zilong/data")
+LOG_PATH = LOG_DIR / "zilong.log"
+
+
+def configure_logging() -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+
+    file_handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+
+    root.addHandler(stream_handler)
+    root.addHandler(file_handler)
+
+
+configure_logging()
+log = logging.getLogger(__name__)
 
 
 def load_credentials(path: Path = CREDENTIALS_PATH) -> dict:
