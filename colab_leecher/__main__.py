@@ -4,6 +4,8 @@ import platform
 import pathlib
 import psutil
 import shutil
+import json
+import subprocess
 from datetime import datetime
 from asyncio import sleep, get_event_loop
 from pyrogram import filters
@@ -59,6 +61,79 @@ async def _prepare_stream_source(url: str) -> str:
     if not source_file:
         raise RuntimeError("Torrent download finished but no media file was found for stream extraction.")
     return source_file
+
+
+def _fmt_hms(seconds: float) -> str:
+    total = int(seconds or 0)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _probe_media_info(path: str) -> str:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=45,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return ""
+        data = json.loads(result.stdout)
+    except Exception as exc:
+        logging.warning("Media info probe failed: %s", exc)
+        return ""
+
+    fmt = data.get("format", {}) or {}
+    streams = data.get("streams", []) or []
+    lines = [
+        "MEDIA INFO",
+        f"FILE  <code>{os.path.basename(path)}</code>",
+        f"SIZE  <code>{sizeUnit(os.path.getsize(path))}</code>",
+    ]
+    duration = float(fmt.get("duration") or 0.0)
+    if duration > 0:
+        lines.append(f"DURATION  <code>{_fmt_hms(duration)}</code>")
+
+    for stream in streams:
+        stype = str(stream.get("codec_type") or "").lower()
+        codec = str(stream.get("codec_name") or "?").upper()
+        tags = stream.get("tags", {}) or {}
+        lang = (tags.get("language") or "").lower()
+        lang_s = f" [{lang}]" if lang else ""
+        if stype == "video":
+            w = stream.get("width", 0)
+            h = stream.get("height", 0)
+            fr = str(stream.get("r_frame_rate") or "0/1")
+            try:
+                fn, fd = fr.split("/")
+                fps = float(fn) / max(float(fd), 1.0)
+                fps_s = f"{fps:.3f}fps"
+            except Exception:
+                fps_s = "?"
+            lines.append(f"VIDEO  <code>{codec}  {w}x{h}  {fps_s}</code>")
+        elif stype == "audio":
+            ch = int(stream.get("channels") or 0)
+            ch_s = {1: "Mono", 2: "Stereo", 6: "5.1", 8: "7.1"}.get(ch, f"{ch}ch" if ch else "")
+            lines.append(f"AUDIO  <code>{codec}  {ch_s}{lang_s}</code>")
+        elif stype == "subtitle":
+            lines.append(f"SUB  <code>{codec}{lang_s}</code>")
+    return "\n".join(lines[:12])
 
 
 def _owner(m): return m.chat.id == OWNER
@@ -788,6 +863,9 @@ async def callbacks(client, cq):
 
             from colab_leecher.uploader.telegram import upload_file
             await upload_file(fp, os.path.basename(fp), is_last=True)
+            media_info = _probe_media_info(fp)
+            if media_info:
+                await colab_bot.send_message(chat_id=OWNER, text=media_info)
             clear_session(chat_id)
 
         except Exception as e:
