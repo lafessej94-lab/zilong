@@ -1,7 +1,9 @@
 import logging
 import os
 import platform
+import pathlib
 import psutil
+import shutil
 from datetime import datetime
 from asyncio import sleep, get_event_loop
 from pyrogram import filters
@@ -15,18 +17,49 @@ from colab_leecher.utility.handler import (
     cancelTask,
 )
 from colab_leecher.utility.variables import (
-    BOT, MSG, BotTimes, Paths, Messages, ProcessTracker, TaskInfo,
+    BOT, MSG, BotTimes, Paths, Messages, ProcessTracker, TaskInfo, Aria2c,
 )
 from colab_leecher.utility.task_manager import taskScheduler
 from colab_leecher.utility.helper import (
     isLink, setThumbnail, message_deleter, send_settings,
-    sizeUnit, getTime, is_ytdl_link, _pct_bar, _speed_emoji,
+    sizeUnit, getTime, is_ytdl_link, fileType, _pct_bar, _speed_emoji,
 )
+from colab_leecher.downlader.aria2 import aria2_Download
 from colab_leecher.stream_extractor import (
     analyse, get_session, clear_session,
     kb_type, kb_video, kb_audio, kb_subs,
     dl_video, dl_audio, dl_sub,
 )
+
+
+def _pick_stream_source_file(root: str) -> str | None:
+    files = [str(p) for p in pathlib.Path(root).glob("**/*") if p.is_file()]
+    if not files:
+        return None
+    videos = [f for f in files if fileType(f) == "video"]
+    pool = videos or files
+    return max(pool, key=lambda p: os.path.getsize(p))
+
+
+async def _prepare_stream_source(url: str) -> str:
+    if not url.startswith("magnet:?xt=urn:btih:"):
+        return url
+
+    if os.path.exists(Paths.WORK_PATH):
+        shutil.rmtree(Paths.WORK_PATH)
+    os.makedirs(Paths.WORK_PATH, exist_ok=True)
+    os.makedirs(Paths.down_path, exist_ok=True)
+
+    Aria2c.link_info = False
+    TaskInfo.reset()
+    TaskInfo.set(phase="download", engine="Aria2c", filename="magnet", started_at=datetime.now().timestamp())
+    await aria2_Download(url, 1)
+
+    source_file = _pick_stream_source_file(Paths.down_path)
+    if not source_file:
+        raise RuntimeError("Torrent download finished but no media file was found for stream extraction.")
+    return source_file
+
 
 def _owner(m): return m.chat.id == OWNER
 def _ring(p):  return "🟢" if p < 40 else ("🟡" if p < 70 else "🔴")
@@ -631,21 +664,39 @@ async def callbacks(client, cq):
         if not url:
             await cq.answer("No URL found.", show_alert=True); return
 
-        await cq.message.edit_text(
-            "🎞 <b>STREAM EXTRACTOR</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"⏳ <i>Analyzing streams...</i>\n"
-            f"<code>{url[:70]}{'…' if len(url)>70 else ''}</code>"
-        )
+        source_url = url
+        if url.startswith("magnet:?xt=urn:btih:"):
+            await cq.message.edit_text(
+                "STREAM EXTRACTOR\n\nDownloading magnet first...\nThe stream menu will open once the main video is local."
+            )
+            MSG.status_msg = cq.message
+            BOT.State.task_going = True
+            try:
+                source_url = await _prepare_stream_source(url)
+            except Exception as exc:
+                BOT.State.task_going = False
+                await cq.message.edit_text(
+                    f"STREAM EXTRACTOR\n\nFailed to prepare source:\n<code>{exc}</code>",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="sx_back")]])
+                )
+                return
+            BOT.State.task_going = False
+        else:
+            await cq.message.edit_text(
+                "STREAM EXTRACTOR\n\n"
+                f"Analyzing streams...\n"
+                f"<code>{url[:70]}{'...' if len(url)>70 else ''}</code>"
+            )
 
-        session = await analyse(url, chat_id)
+        session = await analyse(source_url, chat_id)
 
         if not session or (not session["video"] and not session["audio"] and not session["subs"]):
             await cq.message.edit_text(
-                "🎞 <b>STREAM EXTRACTOR</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "❌ Could not extract streams.\n"
+                "STREAM EXTRACTOR\n\n"
+                "Could not extract streams.\n"
                 "<i>Only yt-dlp compatible sources are supported.</i>",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⏎ Back", callback_data="sx_back")
+                    InlineKeyboardButton("Back", callback_data="sx_back")
                 ]])
             )
             return
