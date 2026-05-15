@@ -8,6 +8,7 @@ class BOT:
     TASK = None
     class Setting:
         stream_upload = "Media"
+        auto_forward = "Off"
         convert_video = "Yes"
         convert_quality = "Low"
         caption = "Monospace"
@@ -22,6 +23,7 @@ class BOT:
 
     class Options:
         stream_upload = True
+        auto_forward = False
         convert_video = True
         convert_quality = False
         is_split = True

@@ -11,7 +11,7 @@ from asyncio import sleep, get_event_loop
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from colab_leecher import CC_API_KEY, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot, OWNER
+from colab_leecher import CC_API_KEY, DUMP_ID, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot, OWNER
 from colab_leecher.cloudconvert import cc_mode_label, quality_label, resize_label
 from colab_leecher.utility.handler import (
     Seedr_CC_Convert_Handler,
@@ -32,6 +32,10 @@ from colab_leecher.stream_extractor import (
     kb_type, kb_video, kb_audio, kb_subs,
     dl_video, dl_audio, dl_sub,
 )
+
+
+BOT.Options.auto_forward = str(DUMP_ID or "").strip() not in ("", "0")
+BOT.Setting.auto_forward = "On" if BOT.Options.auto_forward else "Off"
 
 
 def _pick_stream_source_file(root: str) -> str | None:
@@ -1012,6 +1016,14 @@ async def callbacks(client, cq):
         BOT.Setting.cc_target_size = f"{nxt} MB"
         await cq.answer(BOT.Setting.cc_target_size, show_alert=True)
         await send_settings(client, cq.message, cq.message.id, False)
+    elif data == "autofwd":
+        if str(DUMP_ID or "").strip() in ("", "0"):
+            await cq.answer("Set DUMP_ID first in Colab to use autoforward.", show_alert=True)
+        else:
+            BOT.Options.auto_forward = not BOT.Options.auto_forward
+            BOT.Setting.auto_forward = "On" if BOT.Options.auto_forward else "Off"
+            await cq.answer(f"AutoFwd {BOT.Setting.auto_forward}", show_alert=True)
+            await send_settings(client, cq.message, cq.message.id, False)
     elif data in ["media","document"]:
         BOT.Options.stream_upload = data == "media"
         BOT.Setting.stream_upload = "Media" if data == "media" else "Document"

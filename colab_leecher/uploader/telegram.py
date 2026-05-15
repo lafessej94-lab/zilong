@@ -4,7 +4,7 @@ from asyncio import sleep
 from os import path as ospath
 from datetime import datetime
 from pyrogram.errors import FloodWait
-from colab_leecher import colab_bot, OWNER
+from colab_leecher import DUMP_ID, colab_bot, OWNER
 from colab_leecher.utility.variables import BOT, Transfer, BotTimes, Messages, MSG, Paths
 from colab_leecher.utility.helper import (
     sizeUnit, fileType, getTime, status_bar, thumbMaintainer, videoExtFix,
@@ -103,6 +103,7 @@ async def upload_file(file_path, real_name, is_last: bool = False):
         MSG.sent_msg = sent
         Transfer.sent_file.append(sent)
         Transfer.sent_file_names.append(real_name)
+        await maybe_autoforward(sent)
 
         # Delete the progress status message once the last file lands
         if is_last:
@@ -119,3 +120,21 @@ async def upload_file(file_path, real_name, is_last: bool = False):
     except Exception as e:
         logging.exception(f"Upload error: {e}")
         raise RuntimeError(f"Telegram upload failed for {real_name}: {e}") from e
+
+
+async def maybe_autoforward(message) -> None:
+    dump_target = str(DUMP_ID or "").strip()
+    if not BOT.Options.auto_forward or dump_target in ("", "0"):
+        return
+    try:
+        await colab_bot.copy_message(
+            chat_id=int(dump_target),
+            from_chat_id=OWNER,
+            message_id=message.id,
+        )
+    except FloodWait as e:
+        logging.warning(f"Autoforward FloodWait {e.value}s")
+        await sleep(e.value)
+        await maybe_autoforward(message)
+    except Exception as exc:
+        logging.warning(f"Autoforward skipped: {exc}")

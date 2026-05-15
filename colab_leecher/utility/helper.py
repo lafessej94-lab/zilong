@@ -13,7 +13,7 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 from pyrogram.errors import BadRequest
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 
-from colab_leecher import CC_API_KEY, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot
+from colab_leecher import CC_API_KEY, DUMP_ID, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot
 from colab_leecher.cloudconvert import cc_mode_label, quality_label, resize_label
 from colab_leecher.utility.variables import BOT, MSG, BotTimes, Messages, Paths
 
@@ -355,16 +355,19 @@ async def send_settings(client, message, msg_id, command: bool):
     thmb = "✅ Set" if BOT.Setting.thumbnail else "❌ None"
     cc_ready = "✅ Ready" if CC_API_KEY else "❌ Missing"
     seedr_ready = "✅ Ready" if str(SEEDR_USERNAME or "").strip() and str(SEEDR_PASSWORD or "").strip() else "❌ Missing"
+    dump_ready = "✅ Ready" if str(DUMP_ID or "").strip() not in ("", "0") else "❌ Missing"
+    autofwd_toggle = "📨 AutoFwd ON" if BOT.Options.auto_forward else "📨 AutoFwd OFF"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(up_toggle, callback_data=up_mode),
          InlineKeyboardButton("🎥 Video", callback_data="video")],
         [InlineKeyboardButton("☁️ CloudConvert", callback_data="cc"),
          InlineKeyboardButton("🖼 Thumbnail", callback_data="thumb")],
-        [InlineKeyboardButton("✏️ Caption Font", callback_data="caption"),
-         InlineKeyboardButton("⬅️ Prefix", callback_data="set-prefix")],
-        [InlineKeyboardButton("Suffix ➡️", callback_data="set-suffix"),
-         InlineKeyboardButton("✖ Close", callback_data="close")],
+        [InlineKeyboardButton(autofwd_toggle, callback_data="autofwd"),
+         InlineKeyboardButton("✏️ Caption Font", callback_data="caption")],
+        [InlineKeyboardButton("⬅️ Prefix", callback_data="set-prefix"),
+         InlineKeyboardButton("Suffix ➡️", callback_data="set-suffix")],
+        [InlineKeyboardButton("✖ Close", callback_data="close")],
     ])
 
     text = (
@@ -379,6 +382,8 @@ async def send_settings(client, message, msg_id, command: bool):
         f"🗜  CC Target <code>{BOT.Setting.cc_target_size}</code>\n"
         f"🔑  CC API    <code>{cc_ready}</code>\n"
         f"🧲  Seedr     <code>{seedr_ready}</code>\n"
+        f"📨  AutoFwd  <code>{BOT.Setting.auto_forward}</code>\n"
+        f"📦  Dump ID   <code>{dump_ready}</code>\n"
         f"✏️  Caption   <code>{BOT.Setting.caption}</code>\n"
         f"⬅️  Prefix    <code>{pr}</code>\n"
         f"➡️  Suffix    <code>{su}</code>\n"
