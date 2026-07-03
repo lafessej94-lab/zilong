@@ -62,7 +62,8 @@ async def upload_file(file_path, real_name, is_last: bool = False):
                 supports_streaming=True,
                 width=width, height=height,
                 caption=caption,
-                thumb=thmb_path,
+                thumb=thmb_path,   # petite vignette liste de chat (Telegram plafonne à 320px, hors de notre contrôle)
+                cover=thmb_path,   # 🆕 preview grand format affichée à l'ouverture — pas de limite de résolution
                 duration=int(seconds),
                 progress=progress_bar,
             )
