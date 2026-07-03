@@ -2,6 +2,7 @@ import math
 import logging
 import os
 import psutil
+import subprocess
 from time import time
 from datetime import datetime
 from os import path as ospath
@@ -9,7 +10,6 @@ from urllib.parse import urlparse
 from asyncio import get_event_loop
 
 from PIL import Image
-from moviepy.video.io.VideoFileClip import VideoFileClip
 from pyrogram.errors import BadRequest
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 
@@ -164,23 +164,67 @@ def videoExtFix(file_path: str):
     return new_path
 
 
+def _probe_duration(file_path: str) -> float:
+    """Récupère la durée de la vidéo via ffprobe (rapide, pas de décodage complet)."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                file_path,
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def _extract_frame_ffmpeg(file_path: str, output_path: str, timestamp: float) -> bool:
+    """Extrait une frame HD (max 1280px de large, qualité quasi-lossless) via ffmpeg."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(int(timestamp)),
+        "-i", file_path,
+        "-vframes", "1",
+        "-vf", "scale='min(1280,iw)':-2",
+        "-q:v", "2",
+        output_path,
+    ]
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        return result.returncode == 0 and ospath.exists(output_path)
+    except Exception as exc:
+        logging.warning(f"ffmpeg thumb extraction failed: {exc}")
+        return False
+
+
 def thumbMaintainer(file_path):
+    """
+    Génère/retourne la thumbnail à utiliser pour l'upload.
+    Ordre de priorité: thumbnail custom utilisateur > thumbnail ytdl > extraction ffmpeg HD.
+    """
     if ospath.exists(Paths.VIDEO_FRAME):
         os.remove(Paths.VIDEO_FRAME)
-    try:
-        fname, _ = ospath.splitext(ospath.basename(file_path))
-        ytdl_thumb = f"{Paths.WORK_PATH}/ytdl_thumbnails/{fname}.webp"
-        with VideoFileClip(file_path) as video:
-            if ospath.exists(Paths.THMB_PATH):
-                return Paths.THMB_PATH, video.duration
-            if ospath.exists(ytdl_thumb):
-                return convertIMG(ytdl_thumb), video.duration
-            video.save_frame(Paths.VIDEO_FRAME, t=math.floor(video.duration / 2))
-            return Paths.VIDEO_FRAME, video.duration
-    except Exception as exc:
-        logging.warning(f"Thumb error: {exc}")
-        fallback = Paths.THMB_PATH if ospath.exists(Paths.THMB_PATH) else Paths.HERO_IMAGE
-        return fallback, 0
+
+    if ospath.exists(Paths.THMB_PATH):
+        return Paths.THMB_PATH, _probe_duration(file_path)
+
+    fname, _ = ospath.splitext(ospath.basename(file_path))
+    ytdl_thumb = f"{Paths.WORK_PATH}/ytdl_thumbnails/{fname}.webp"
+    duration = _probe_duration(file_path)
+
+    if ospath.exists(ytdl_thumb):
+        return convertIMG(ytdl_thumb), duration
+
+    timestamp = duration / 2 if duration else 1
+    if _extract_frame_ffmpeg(file_path, Paths.VIDEO_FRAME, timestamp):
+        return Paths.VIDEO_FRAME, duration
+
+    logging.warning("Thumb error: ffmpeg extraction failed, falling back")
+    fallback = Paths.THMB_PATH if ospath.exists(Paths.THMB_PATH) else Paths.HERO_IMAGE
+    return fallback, duration
 
 
 async def setThumbnail(message):
