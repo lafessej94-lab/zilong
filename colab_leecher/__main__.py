@@ -11,11 +11,12 @@ from asyncio import sleep, get_event_loop
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from colab_leecher import CC_API_KEY, DUMP_ID, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot, OWNER
+from colab_leecher import CC_API_KEY, FC_API_KEY, DUMP_ID, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot, OWNER
 from colab_leecher.cloudconvert import cc_mode_label, quality_label, resize_label
 from colab_leecher.utility.handler import (
     Seedr_CC_Convert_Handler,
     Seedr_CC_Hardsub_Handler,
+    Seedr_FC_Hardsub_Handler,
     cancelTask,
 )
 from colab_leecher.utility.variables import (
@@ -179,6 +180,7 @@ async def start(client, message):
         "🎬 YouTube · Mega · Terabox\n"
         "☁️ CloudConvert convert · resize · compress\n"
         "🧲 Seedr + CloudConvert convert · hardsub\n"
+        "🧲 Seedr + FreeConvert hardsub\n"
         "🎞 Stream Extractor (any link)\n"
         "📊 /status — live dashboard\n"
         "📡 /nyaa_search — anime search\n\n"
@@ -229,6 +231,7 @@ async def help_cmd(client, message):
         "  <code>(pass)</code>     — unzip password\n\n"
         "☁️ <b>CloudConvert</b> — use CC Convert / Resize / Compress buttons\n"
         "🧲 <b>Seedr + CC</b> — on magnet links, use Seedr+CC Convert / Hardsub\n"
+        "🧲 <b>Seedr + FreeConvert</b> — on magnet links, use Seedr+FC Hardsub\n"
         "🎞 <b>Stream Extractor</b> — tap 🎞 Streams on any link\n"
         "🖼 Send a <b>photo</b> to set thumbnail"
     )
@@ -542,6 +545,9 @@ def _mode_keyboard():
             InlineKeyboardButton("☁️ Seedr+CC Convert", callback_data="seedr_cc_convert"),
             InlineKeyboardButton("☁️ Seedr+CC Hardsub", callback_data="seedr_cc_hardsub"),
         ])
+        rows.append([
+            InlineKeyboardButton("🆓 Seedr+FC Hardsub", callback_data="seedr_fc_hardsub"),
+        ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -716,9 +722,15 @@ async def callbacks(client, cq):
         TaskInfo.reset()
         return
 
-    if data in ["seedr_cc_convert", "seedr_cc_hardsub"]:
-        if not CC_API_KEY.strip():
+    if data in ["seedr_cc_convert", "seedr_cc_hardsub", "seedr_fc_hardsub"]:
+        needs_cc = data in ("seedr_cc_convert", "seedr_cc_hardsub")
+        needs_fc = data == "seedr_fc_hardsub"
+
+        if needs_cc and not CC_API_KEY.strip():
             await cq.answer("CloudConvert API key is missing in your Colab launcher.", show_alert=True)
+            return
+        if needs_fc and not FC_API_KEY.strip():
+            await cq.answer("FreeConvert API key is missing in your Colab launcher.", show_alert=True)
             return
         if not str(SEEDR_USERNAME or "").strip() or not str(SEEDR_PASSWORD or "").strip():
             await cq.answer("Seedr credentials are missing in your Colab launcher.", show_alert=True)
@@ -741,13 +753,15 @@ async def callbacks(client, cq):
         BOT.State.started = False
         BotTimes.start_time = datetime.now()
         TaskInfo.reset()
-        TaskInfo.set(phase="process", engine="Seedr+CloudConvert", started_at=datetime.now().timestamp())
+        engine_label = "Seedr+FreeConvert" if needs_fc else "Seedr+CloudConvert"
+        TaskInfo.set(phase="process", engine=engine_label, started_at=datetime.now().timestamp())
+        BOT.Mode.type = data
         if data == "seedr_cc_convert":
-            BOT.Mode.type = data
             BOT.TASK = get_event_loop().create_task(Seedr_CC_Convert_Handler(magnet))
-        else:
-            BOT.Mode.type = data
+        elif data == "seedr_cc_hardsub":
             BOT.TASK = get_event_loop().create_task(Seedr_CC_Hardsub_Handler(magnet))
+        else:
+            BOT.TASK = get_event_loop().create_task(Seedr_FC_Hardsub_Handler(magnet))
         await BOT.TASK
         BOT.State.task_going = False
         TaskInfo.reset()
