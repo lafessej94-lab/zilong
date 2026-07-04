@@ -6,7 +6,7 @@ import logging
 import pathlib
 from asyncio import sleep
 from time import time
-from colab_leecher import OWNER, CC_API_KEY, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot
+from colab_leecher import OWNER, CC_API_KEY, FC_API_KEY, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot
 from natsort import natsorted
 from datetime import datetime
 from os import makedirs, path as ospath
@@ -19,6 +19,10 @@ from colab_leecher.cloudconvert import (
     quality_label,
     resize_file,
     resize_label,
+)
+from colab_leecher.freeconvert import (
+    hardsub_remote_url as fc_hardsub_remote_url,
+    quality_label as fc_quality_label,
 )
 from colab_leecher.seedr import SeedrError, _del_folder, fetch_urls_via_seedr
 from colab_leecher.uploader.telegram import upload_file
@@ -527,6 +531,87 @@ async def Seedr_CC_Hardsub_Handler(magnet: str) -> None:
             await _del_folder(seedr_user, seedr_pwd, folder_id)
 
 
+async def Seedr_FC_Hardsub_Handler(magnet: str) -> None:
+    """
+    Équivalent de Seedr_CC_Hardsub_Handler mais via FreeConvert au lieu de
+    CloudConvert. Même pipeline : Seedr -> sonde la piste FR -> extrait le
+    sous-titre -> hardsub -> upload Telegram.
+    """
+    if not _seedr_ready():
+        await cancelTask("Seedr credentials are missing in your Colab launcher.")
+        return
+    if not FC_API_KEY.strip():
+        await cancelTask("FreeConvert API key is missing in your Colab launcher.")
+        return
+
+    if ospath.exists(Paths.temp_cc_path):
+        shutil.rmtree(Paths.temp_cc_path)
+    makedirs(Paths.temp_cc_path)
+
+    subtitle_dir = ospath.join(Paths.WORK_PATH, "seedr_subtitles")
+    if ospath.exists(subtitle_dir):
+        shutil.rmtree(subtitle_dir)
+    makedirs(subtitle_dir)
+
+    folder_id = None
+    seedr_user = seedr_pwd = ""
+    try:
+        await _seedr_status("Seedr + FreeConvert Hardsub", "Seedr", 0.0, "Preparing Seedr job")
+
+        async def _seedr_cb(stage: str, pct: float, detail: str) -> None:
+            await _seedr_status("Seedr + FreeConvert Hardsub", f"Seedr/{stage}", pct * 0.30, detail)
+
+        files, folder_id, seedr_user, seedr_pwd = await fetch_urls_via_seedr(magnet, progress_cb=_seedr_cb)
+        videos = _seedr_video_files(files)
+        if not videos:
+            raise SeedrError("Seedr completed, but no video file was found in the torrent.")
+
+        total = len(videos)
+        for idx, video in enumerate(videos):
+            name = video["name"]
+            video_url = video["url"]
+            stem = ospath.splitext(ospath.basename(name))[0]
+            base_start = 30.0 + ((idx / total) * 55.0)
+            base_end = 30.0 + (((idx + 1) / total) * 55.0)
+
+            await _seedr_status("Seedr + FreeConvert Hardsub", "Probe", base_start, "Inspecting subtitle streams", name)
+            probe = await _probe_remote_video(video_url)
+            sub_stream = _pick_french_text_subtitle(probe)
+            if not sub_stream:
+                raise RuntimeError(f"No French text subtitle stream found in {name}")
+
+            await _seedr_status("Seedr + FreeConvert Hardsub", "Extract", base_start + 6.0, "Extracting French subtitles", name)
+            subtitle_path = await _extract_subtitle_from_url(video_url, sub_stream, subtitle_dir, stem)
+
+            async def _process_cb(pct: float, detail: str, filename: str = name) -> None:
+                overall = (base_start + 10.0) + ((base_end - (base_start + 10.0)) * max(0.0, min(pct, 100.0)) / 100.0)
+                await _seedr_status("Seedr + FreeConvert Hardsub", "FreeConvert", overall, detail, filename)
+
+            async def _download_cb(pct: float, detail: str, filename: str = name) -> None:
+                overall = 85.0 + ((idx + (max(0.0, min(pct, 100.0)) / 100.0)) / total * 15.0)
+                await _seedr_status("Seedr + FreeConvert Hardsub", "Download", overall, detail, filename)
+
+            await _seedr_status("Seedr + FreeConvert Hardsub", "Queue", base_start + 10.0, "Submitting FreeConvert hardsub job", name)
+            await fc_hardsub_remote_url(
+                FC_API_KEY,
+                video_url,
+                name,
+                subtitle_path,
+                Paths.temp_cc_path,
+                quality_profile=BOT.Options.cc_quality_profile,
+                process_cb=_process_cb,
+                download_cb=_download_cb,
+            )
+
+        await _seedr_status("Seedr + FreeConvert Hardsub", "Upload", 100.0, "Uploading to Telegram")
+        await Leech(Paths.temp_cc_path, True, convert_videos=False)
+    except Exception as exc:
+        await cancelTask(f"Seedr+FC hardsub failed\n\n{exc}")
+    finally:
+        if folder_id and seedr_user and seedr_pwd:
+            await _del_folder(seedr_user, seedr_pwd, folder_id)
+
+
 async def Zip_Handler(down_path: str, is_split: bool, remove: bool):
     Messages.status_head = f"🗜 <b>COMPRESSING</b>\n\n<code>{Messages.download_name}</code>\n"
     TaskInfo.set(phase="process", engine="zip", filename=Messages.download_name)
@@ -569,67 +654,6 @@ async def Unzip_Handler(down_path: str, remove: bool):
     if remove: shutil.rmtree(down_path)
 
 
-# ═════════════════════════════════════════════════════════════
-# cancelTask — FIXED: now kills ALL subprocesses
-# ═════════════════════════════════════════════════════════════
-
-async def cancelTask(reason: str):
-    """
-    Kill the running task AND every subprocess it spawned.
-
-    The old version only called BOT.TASK.cancel() which cancels the
-    Python asyncio coroutine but leaves aria2c/ffmpeg/yt-dlp running
-    as orphan processes. ProcessTracker.kill_all() sends SIGTERM to
-    every registered PID — this is why tasks actually stop now.
-    """
-    spent = getTime((datetime.now() - BotTimes.start_time).seconds)
-
-    # 1. Kill ALL tracked subprocesses (aria2c, ffmpeg, yt-dlp, etc.)
-    killed = ProcessTracker.kill_all()
-
-    # 2. Cancel the asyncio task
-    if BOT.State.task_going:
-        try:
-            if BOT.TASK and not BOT.TASK.done():
-                BOT.TASK.cancel()
-        except Exception as e:
-            logging.warning(f"Task cancel: {e}")
-
-    # 3. Also kill any stray aria2c/ffmpeg processes by name
-    _kill_stray_processes()
-
-    # 4. Cleanup work directory
-    try:
-        if ospath.exists(Paths.WORK_PATH):
-            shutil.rmtree(Paths.WORK_PATH)
-    except Exception as e:
-        logging.warning(f"Cancel cleanup: {e}")
-
-    # 5. Reset state
-    BOT.State.task_going = False
-    TaskInfo.reset()
-
-    text = (
-        "⛔ <b>TASK CANCELLED</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"❓  <b>Reason</b>   <i>{reason}</i>\n"
-        f"⏱  <b>Spent</b>    <code>{spent}</code>\n"
-        f"💀  <b>Killed</b>   <code>{killed} process(es)</code>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>All downloads, uploads and processing stopped.</i>"
-    )
-
-    try:
-        await MSG.status_msg.edit_text(text)
-    except Exception:
-        try:
-            await colab_bot.send_message(chat_id=OWNER, text=text)
-        except Exception:
-            pass
-
-    logging.info(f"[Cancel] Task cancelled: {reason} — killed {killed} procs")
-
-
 def _kill_stray_processes():
     """Kill any aria2c/ffmpeg/yt-dlp that might have been missed."""
     import subprocess
@@ -639,22 +663,6 @@ def _kill_stray_processes():
                 ["pkill", "-f", name],
                 capture_output=True, timeout=5,
             )
-        except Exception:
-            pass
-
-
-async def SendLogs(is_leech: bool):
-    BOT.State.started    = False
-    BOT.State.task_going = False
-    TaskInfo.reset()
-
-
-def _kill_stray_processes():
-    import subprocess
-
-    for name in ("aria2c", "ffmpeg", "ffprobe"):
-        try:
-            subprocess.run(["pkill", "-f", name], capture_output=True, timeout=5)
         except Exception:
             pass
 
