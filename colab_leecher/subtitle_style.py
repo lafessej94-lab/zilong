@@ -25,7 +25,7 @@ class AssStyle:
     secondary_colour: str = "&H000000FF"
     outline_colour: str = "&H00000000"   # contour noir
     back_colour: str = "&H80000000"      # ombre semi-transparente (alpha 80 = ~50%)
-    bold: int = 0
+    bold: int = -1                       # -1 = gras activé en ASS (0 = désactivé)
     italic: int = 0
     border_style: int = 1                # 1 = contour + ombre, 3 = boîte pleine
     outline: float = 1.8                 # contour fin mais visible
