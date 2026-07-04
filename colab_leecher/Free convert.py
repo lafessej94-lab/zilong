@@ -1,0 +1,273 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import logging
+import os
+import time
+from dataclasses import dataclass
+from typing import Awaitable, Callable, Optional
+
+import aiohttp
+
+from colab_leecher.subtitle_style import DEFAULT_HARDSUB_STYLE, AssStyle, apply_hardsub_style
+
+log = logging.getLogger(__name__)
+
+FC_API = "https://api.freeconvert.com/v1"
+_TIMEOUT_SHORT = aiohttp.ClientTimeout(total=30)
+_TIMEOUT_DOWNLOAD = aiohttp.ClientTimeout(total=7200)
+
+ProgressCB = Optional[Callable[[float, str], Awaitable[None]]]
+
+
+@dataclass(frozen=True)
+class QualityProfile:
+    key: str
+    label: str
+    crf: int
+    speed: str
+
+
+QUALITY_PROFILES = {
+    "fast": QualityProfile("fast", "Fast", 25, "veryfast"),
+    "balanced": QualityProfile("balanced", "Balanced", 23, "medium"),
+    "small": QualityProfile("small", "Small", 28, "faster"),
+    "best": QualityProfile("best", "Best", 21, "slow"),
+}
+
+
+def normalize_quality_profile(profile: str | None) -> str:
+    profile = (profile or "balanced").strip().lower()
+    return profile if profile in QUALITY_PROFILES else "balanced"
+
+
+def quality_label(profile: str | None) -> str:
+    return QUALITY_PROFILES[normalize_quality_profile(profile)].label
+
+
+def parse_api_keys(raw: str) -> list[str]:
+    return [key.strip() for key in (raw or "").split(",") if key.strip()]
+
+
+async def get_account_info(api_key: str) -> dict:
+    """
+    FreeConvert n'a pas d'endpoint 'credits' aussi direct que CloudConvert ;
+    on teste juste que la clé est valide via un ping léger sur /process/jobs.
+    """
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        async with aiohttp.ClientSession(timeout=_TIMEOUT_SHORT) as sess:
+            async with sess.get(f"{FC_API}/process/jobs?per_page=1", headers=headers) as resp:
+                if resp.status == 200:
+                    return {"valid": True, "error": None}
+                return {"valid": False, "error": f"HTTP {resp.status}"}
+    except Exception as exc:
+        return {"valid": False, "error": str(exc)}
+
+
+async def pick_working_key(api_keys: list[str]) -> str:
+    if not api_keys:
+        raise RuntimeError("FreeConvert API key is missing.")
+    if len(api_keys) == 1:
+        return api_keys[0]
+
+    results = await asyncio.gather(*(get_account_info(key) for key in api_keys))
+    for key, info in zip(api_keys, results):
+        if info.get("valid"):
+            return key
+    raise RuntimeError("Aucune clé FreeConvert valide/disponible.")
+
+
+async def _post_job(api_key: str, payload: dict) -> dict:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession(timeout=_TIMEOUT_SHORT) as sess:
+        async with sess.post(f"{FC_API}/process/jobs", json=payload, headers=headers) as resp:
+            data = await resp.json()
+            if resp.status not in (200, 201):
+                raise RuntimeError(data.get("message") or f"FreeConvert job creation failed ({resp.status})")
+    return data
+
+
+async def _job_status(api_key: str, job_id: str) -> dict:
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with aiohttp.ClientSession(timeout=_TIMEOUT_SHORT) as sess:
+        async with sess.get(f"{FC_API}/process/jobs/{job_id}", headers=headers) as resp:
+            data = await resp.json()
+            if resp.status != 200:
+                raise RuntimeError(data.get("message") or f"FreeConvert job fetch failed ({resp.status})")
+    return data
+
+
+def _find_task(job: dict, name: str) -> Optional[dict]:
+    for task in job.get("tasks", []):
+        if task.get("name") == name:
+            return task
+    return None
+
+
+def _export_url(job: dict) -> str:
+    export_task = _find_task(job, "export")
+    if not export_task:
+        return ""
+    result = export_task.get("result") or {}
+    url = result.get("url")
+    if url:
+        return str(url)
+    files = result.get("files") or []
+    if files and files[0].get("url"):
+        return str(files[0]["url"])
+    return ""
+
+
+def _job_failure_reason(job: dict) -> str:
+    for task in job.get("tasks", []):
+        if str(task.get("status") or "").lower() in {"error", "failed"}:
+            msg = task.get("message") or (task.get("result") or {}).get("message")
+            name = task.get("name") or task.get("operation") or "task"
+            return f"{name}: {msg}" if msg else f"{name} failed"
+    return str(job.get("message") or "Unknown FreeConvert error")
+
+
+async def _wait_for_job(
+    api_key: str,
+    job_id: str,
+    progress_cb: ProgressCB = None,
+    timeout_s: int = 3600,
+) -> dict:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        job = await _job_status(api_key, job_id)
+        status = str(job.get("status") or "")
+        if status == "completed":
+            if progress_cb:
+                await progress_cb(100.0, "FreeConvert terminé")
+            return job
+        if status in {"failed", "error"}:
+            raise RuntimeError(_job_failure_reason(job))
+
+        tasks = job.get("tasks") or []
+        finished = sum(1 for t in tasks if str(t.get("status")).lower() == "completed")
+        pct = min(95.0, (finished / len(tasks) * 100.0)) if tasks else 0.0
+        if progress_cb:
+            await progress_cb(pct, f"FreeConvert {status}")
+        await asyncio.sleep(3)
+    raise RuntimeError(f"FreeConvert job {job_id} timed out.")
+
+
+async def _download_file(url: str, dest_path: str, progress_cb: ProgressCB = None) -> str:
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    async with aiohttp.ClientSession(timeout=_TIMEOUT_DOWNLOAD) as sess:
+        async with sess.get(url) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"FreeConvert export download failed ({resp.status}).")
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            if progress_cb:
+                await progress_cb(0.0, "Téléchargement du résultat")
+            with open(dest_path, "wb") as fh:
+                async for chunk in resp.content.iter_chunked(1024 * 512):
+                    fh.write(chunk)
+                    done += len(chunk)
+                    if progress_cb and total > 0:
+                        await progress_cb(min(100.0, done / total * 100.0), "Téléchargement du résultat")
+    if progress_cb:
+        await progress_cb(100.0, "Téléchargement terminé")
+    return dest_path
+
+
+def _encode_subtitle_b64(subtitle_path: str) -> str:
+    with open(subtitle_path, "rb") as fh:
+        return base64.b64encode(fh.read()).decode("ascii")
+
+
+def _create_hardsub_payload(
+    *,
+    video_url: str,
+    input_format: str,
+    output_format: str,
+    subtitle_b64: str,
+    crf: int,
+    speed: str,
+) -> dict:
+    return {
+        "tasks": {
+            "import-video": {
+                "operation": "import/url",
+                "url": video_url,
+            },
+            "hardsub": {
+                "operation": "convert",
+                "input": "import-video",
+                "input_format": input_format,
+                "output_format": output_format,
+                "options": {
+                    "video_codec": "libx264",
+                    "video_rate_control_h264": "crf",
+                    "video_crf_h264": crf,
+                    "video_encoding_speed_h264_265": speed,
+                    "audio_codec": "aac",
+                    "audio_bitrate_aac": "128k",
+                    "subtitle_add": "upload",
+                    "subtitle": subtitle_b64,
+                    "subtitle_mode": "hard",
+                },
+            },
+            "export": {
+                "operation": "export/url",
+                "input": ["hardsub"],
+            },
+        }
+    }
+
+
+async def hardsub_remote_url(
+    api_keys: str,
+    video_url: str,
+    source_name: str,
+    subtitle_path: str,
+    dest_dir: str,
+    *,
+    quality_profile: str = "balanced",
+    style: AssStyle = DEFAULT_HARDSUB_STYLE,
+    process_cb: ProgressCB = None,
+    download_cb: ProgressCB = None,
+) -> str:
+    """
+    Brûle des sous-titres dans une vidéo via FreeConvert, en forçant le style
+    ASS (police/contour/ombre) avant envoi puisque FreeConvert applique
+    tel quel le style écrit dans le fichier sous-titre reçu.
+    """
+    keys = parse_api_keys(api_keys)
+    api_key = await pick_working_key(keys)
+    cfg = QUALITY_PROFILES[normalize_quality_profile(quality_profile)]
+
+    base = os.path.splitext(os.path.basename(source_name))[0]
+    input_format = os.path.splitext(source_name)[1].lstrip(".").lower() or "mkv"
+    output_name = f"{base}.VOSTFR.mp4"
+    output_path = os.path.join(dest_dir, output_name)
+
+    # Pré-stylage : force le rendu, indépendamment de ce que contenait le fichier source
+    styled_sub_path = os.path.join(dest_dir, f"{base}.styled.ass")
+    apply_hardsub_style(subtitle_path, styled_sub_path, style=style)
+    subtitle_b64 = _encode_subtitle_b64(styled_sub_path)
+
+    payload = _create_hardsub_payload(
+        video_url=video_url,
+        input_format=input_format,
+        output_format="mp4",
+        subtitle_b64=subtitle_b64,
+        crf=cfg.crf,
+        speed=cfg.speed,
+    )
+
+    job = await _post_job(api_key, payload)
+    job_id = job.get("id", "?")
+    job = await _wait_for_job(api_key, job_id, process_cb)
+    url = _export_url(job)
+    if not url:
+        raise RuntimeError("FreeConvert a terminé sans URL d'export.")
+    return await _download_file(url, output_path, download_cb)
