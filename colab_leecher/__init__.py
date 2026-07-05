@@ -68,7 +68,7 @@ colab_bot = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    max_concurrent_transmissions=8,  # défaut pyrofork = 1 (un seul flux) -> upload/download en série
+    max_concurrent_transmissions=6,  # défaut pyrofork = 1 (un seul flux) -> upload/download en série
     sleep_threshold=120,             # laisse pyrofork absorber les FloodWait courts sans planter
 )
 log.info("Pyrogram Client initialized")
