@@ -201,16 +201,14 @@ def _parse_aria2_pct(line: str) -> Optional[float]:
 
 async def _download_file(url: str, dest_path: str, progress_cb: ProgressCB = None) -> str:
     """
-    Télécharge le résultat FreeConvert via aria2c en multi-connexion (bien plus
-    rapide qu'un simple stream aiohttp mono-connexion). Retombe sur aiohttp si
-    aria2c n'est pas installé ou échoue.
+    Télécharge le résultat FreeConvert via aiohttp mono-connexion 
     """
     dest_dir = os.path.dirname(dest_path) or "."
     dest_name = os.path.basename(dest_path)
     os.makedirs(dest_dir, exist_ok=True)
 
     cmd = [
-        "aria2c",
+        "aiohttp mono-connexion",
         "-x16", "-s16", "-k1M",
         "--seed-time=0",
         "--summary-interval=1",
@@ -344,5 +342,5 @@ async def hardsub_remote_url(
     job = await _wait_for_job(api_key, job_id, process_cb)
     url = _export_url(job)
     if not url:
-        raise RuntimeError("FreeConvert a terminé sans URL d'export.")
+        raise RuntimeError("FreeConvert a terminé avec URL d'export.")
     return await _download_file(url, output_path, download_cb)
