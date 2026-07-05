@@ -4,6 +4,7 @@ import os
 import shutil
 import logging
 import pathlib
+import uuid
 from asyncio import sleep
 from time import time
 from colab_leecher import OWNER, CC_API_KEY, FC_API_KEY, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot
@@ -317,6 +318,41 @@ async def _seedr_status(kind: str, stage: str, pct: float, detail: str, filename
         pass
 
 
+# ═════════════════════════════════════════════════════════════
+# Concurrence FreeConvert Hardsub — jusqu'à 3 jobs en vrai parallèle.
+#
+# Le hardsub FreeConvert se fait sur les serveurs de FreeConvert (pas sur
+# Colab), donc plusieurs jobs peuvent tourner en même temps sans se marcher
+# dessus au niveau CPU — il suffit juste que chaque job ait :
+#   - son propre message de statut Telegram (pas MSG.status_msg, partagé)
+#   - son propre dossier de travail (pas Paths.temp_cc_path, partagé)
+# Le reste du pipeline (leech normal, CloudConvert, zip...) reste séquentiel
+# comme avant, gated par BOT.State.task_going — on ne touche pas à ça.
+# ═════════════════════════════════════════════════════════════
+
+FC_HARDSUB_CONCURRENCY = 3
+_fc_hardsub_semaphore = asyncio.Semaphore(FC_HARDSUB_CONCURRENCY)
+
+
+async def _fc_job_status(status_msg, kind: str, stage: str, pct: float, detail: str, filename: str = "") -> None:
+    """Comme _seedr_status, mais édite un message dédié à CE job précis
+    plutôt que le MSG.status_msg global — permet à plusieurs jobs FreeConvert
+    de tourner en parallèle sans que leurs messages de statut ne s'écrasent."""
+    pct = max(0.0, min(float(pct), 100.0))
+    text = (
+        f"🆓 <b>{kind}</b>\n\n"
+        f"<code>{filename or 'FreeConvert job'}</code>\n\n"
+        f"<b>Stage</b>  <code>{stage}</code>\n"
+        f"<b>Progress</b>  <code>{pct:.1f}%</code>\n"
+        f"<b>Preset</b>  <code>{fc_quality_label(BOT.Options.cc_quality_profile)}</code>\n"
+        f"<b>Detail</b>  <code>{detail}</code>"
+    )
+    try:
+        await status_msg.edit_text(text, disable_web_page_preview=True)
+    except Exception:
+        pass
+
+
 async def _probe_remote_video(url: str) -> dict:
     out, _ = await _run_tracked_process(
         [
@@ -531,133 +567,172 @@ async def Seedr_CC_Hardsub_Handler(magnet: str) -> None:
             await _del_folder(seedr_user, seedr_pwd, folder_id)
 
 
-async def Seedr_FC_Hardsub_Handler(magnet: str) -> None:
+async def Seedr_FC_Hardsub_Handler(magnet: str, status_msg) -> None:
     """
     Équivalent de Seedr_CC_Hardsub_Handler mais via FreeConvert au lieu de
     CloudConvert. Même pipeline : Seedr -> sonde la piste FR -> extrait le
     sous-titre -> hardsub -> upload Telegram.
+
+    Conçu pour tourner en PARALLÈLE avec d'autres jobs FC hardsub (jusqu'à
+    FC_HARDSUB_CONCURRENCY à la fois) : dossier de travail et message de
+    statut dédiés à ce job, pas de dépendance à MSG.status_msg/BOT.State.
     """
     if not _seedr_ready():
-        await cancelTask("Seedr credentials are missing in your Colab launcher.")
+        try:
+            await status_msg.edit_text("❌ Seedr credentials are missing in your Colab launcher.")
+        except Exception:
+            pass
         return
     if not FC_API_KEY.strip():
-        await cancelTask("FreeConvert API key is missing in your Colab launcher.")
+        try:
+            await status_msg.edit_text("❌ FreeConvert API key is missing in your Colab launcher.")
+        except Exception:
+            pass
         return
 
-    if ospath.exists(Paths.temp_cc_path):
-        shutil.rmtree(Paths.temp_cc_path)
-    makedirs(Paths.temp_cc_path)
+    job_id = uuid.uuid4().hex[:8]
+    job_dir = f"{Paths.temp_cc_path}_{job_id}"
+    subtitle_dir = ospath.join(Paths.WORK_PATH, f"seedr_subtitles_{job_id}")
+    makedirs(job_dir, exist_ok=True)
+    makedirs(subtitle_dir, exist_ok=True)
 
-    subtitle_dir = ospath.join(Paths.WORK_PATH, "seedr_subtitles")
-    if ospath.exists(subtitle_dir):
-        shutil.rmtree(subtitle_dir)
-    makedirs(subtitle_dir)
+    await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Queue", 0.0, "En attente d'un slot disponible...")
 
-    folder_id = None
-    seedr_user = seedr_pwd = ""
-    try:
-        await _seedr_status("Seedr + FreeConvert Hardsub", "Seedr", 0.0, "Preparing Seedr job")
+    async with _fc_hardsub_semaphore:
+        folder_id = None
+        seedr_user = seedr_pwd = ""
+        try:
+            await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Seedr", 0.0, "Preparing Seedr job")
 
-        async def _seedr_cb(stage: str, pct: float, detail: str) -> None:
-            await _seedr_status("Seedr + FreeConvert Hardsub", f"Seedr/{stage}", pct * 0.30, detail)
+            async def _seedr_cb(stage: str, pct: float, detail: str) -> None:
+                await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", f"Seedr/{stage}", pct * 0.30, detail)
 
-        files, folder_id, seedr_user, seedr_pwd = await fetch_urls_via_seedr(magnet, progress_cb=_seedr_cb)
-        videos = _seedr_video_files(files)
-        if not videos:
-            raise SeedrError("Seedr completed, but no video file was found in the torrent.")
+            files, folder_id, seedr_user, seedr_pwd = await fetch_urls_via_seedr(magnet, progress_cb=_seedr_cb)
+            videos = _seedr_video_files(files)
+            if not videos:
+                raise SeedrError("Seedr completed, but no video file was found in the torrent.")
 
-        total = len(videos)
-        for idx, video in enumerate(videos):
-            name = video["name"]
-            video_url = video["url"]
-            stem = ospath.splitext(ospath.basename(name))[0]
-            base_start = 30.0 + ((idx / total) * 55.0)
-            base_end = 30.0 + (((idx + 1) / total) * 55.0)
+            total = len(videos)
+            for idx, video in enumerate(videos):
+                name = video["name"]
+                video_url = video["url"]
+                stem = ospath.splitext(ospath.basename(name))[0]
+                base_start = 30.0 + ((idx / total) * 55.0)
+                base_end = 30.0 + (((idx + 1) / total) * 55.0)
 
-            await _seedr_status("Seedr + FreeConvert Hardsub", "Probe", base_start, "Inspecting subtitle streams", name)
-            probe = await _probe_remote_video(video_url)
-            sub_stream = _pick_french_text_subtitle(probe)
-            if not sub_stream:
-                raise RuntimeError(f"No French text subtitle stream found in {name}")
+                await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Probe", base_start, "Inspecting subtitle streams", name)
+                probe = await _probe_remote_video(video_url)
+                sub_stream = _pick_french_text_subtitle(probe)
+                if not sub_stream:
+                    raise RuntimeError(f"No French text subtitle stream found in {name}")
 
-            await _seedr_status("Seedr + FreeConvert Hardsub", "Extract", base_start + 6.0, "Extracting French subtitles", name)
-            subtitle_path = await _extract_subtitle_from_url(video_url, sub_stream, subtitle_dir, stem)
+                await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Extract", base_start + 6.0, "Extracting French subtitles", name)
+                subtitle_path = await _extract_subtitle_from_url(video_url, sub_stream, subtitle_dir, stem)
 
-            async def _process_cb(pct: float, detail: str, filename: str = name) -> None:
-                overall = (base_start + 10.0) + ((base_end - (base_start + 10.0)) * max(0.0, min(pct, 100.0)) / 100.0)
-                await _seedr_status("Seedr + FreeConvert Hardsub", "FreeConvert", overall, detail, filename)
+                async def _process_cb(pct: float, detail: str, filename: str = name) -> None:
+                    overall = (base_start + 10.0) + ((base_end - (base_start + 10.0)) * max(0.0, min(pct, 100.0)) / 100.0)
+                    await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "FreeConvert", overall, detail, filename)
 
-            async def _download_cb(pct: float, detail: str, filename: str = name) -> None:
-                overall = 85.0 + ((idx + (max(0.0, min(pct, 100.0)) / 100.0)) / total * 15.0)
-                await _seedr_status("Seedr + FreeConvert Hardsub", "Download", overall, detail, filename)
+                async def _download_cb(pct: float, detail: str, filename: str = name) -> None:
+                    overall = 85.0 + ((idx + (max(0.0, min(pct, 100.0)) / 100.0)) / total * 15.0)
+                    await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Download", overall, detail, filename)
 
-            await _seedr_status("Seedr + FreeConvert Hardsub", "Queue", base_start + 10.0, "Submitting FreeConvert hardsub job", name)
-            await fc_hardsub_remote_url(
-                FC_API_KEY,
-                video_url,
-                name,
-                subtitle_path,
-                Paths.temp_cc_path,
-                quality_profile=BOT.Options.cc_quality_profile,
-                process_cb=_process_cb,
-                download_cb=_download_cb,
-            )
+                await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Queue", base_start + 10.0, "Submitting FreeConvert hardsub job", name)
+                await fc_hardsub_remote_url(
+                    FC_API_KEY,
+                    video_url,
+                    name,
+                    subtitle_path,
+                    job_dir,
+                    quality_profile=BOT.Options.cc_quality_profile,
+                    process_cb=_process_cb,
+                    download_cb=_download_cb,
+                )
 
-        await _seedr_status("Seedr + FreeConvert Hardsub", "Upload", 100.0, "Uploading to Telegram")
-        await Leech(Paths.temp_cc_path, True, convert_videos=False)
-    except Exception as exc:
-        await cancelTask(f"Seedr+FC hardsub failed\n\n{exc}")
-    finally:
-        if folder_id and seedr_user and seedr_pwd:
-            await _del_folder(seedr_user, seedr_pwd, folder_id)
+            await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Upload", 100.0, "Uploading to Telegram")
+            await Leech(job_dir, True, convert_videos=False)
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                await status_msg.edit_text(f"❌ <b>Seedr+FC hardsub failed</b>\n\n<code>{exc}</code>")
+            except Exception:
+                pass
+        finally:
+            if folder_id and seedr_user and seedr_pwd:
+                await _del_folder(seedr_user, seedr_pwd, folder_id)
+            for d in (job_dir, subtitle_dir):
+                if ospath.exists(d):
+                    shutil.rmtree(d, ignore_errors=True)
 
 
-async def Direct_FC_Hardsub_Handler(video_url: str, name: str, subtitle_path: str) -> None:
+async def Direct_FC_Hardsub_Handler(video_url: str, name: str, subtitle_path: str, status_msg) -> None:
     """
     Hardsub FreeConvert sur un lien direct (ex: lien Seedr, lien HTTP classique),
     avec un fichier de sous-titres fourni manuellement par l'utilisateur —
     pas de Seedr, pas d'extraction automatique de piste sub, pas de sonde
     ffprobe. On envoie juste video_url + le sous-titre reçu à FreeConvert.
+
+    Conçu pour tourner en PARALLÈLE avec d'autres jobs FC hardsub (jusqu'à
+    FC_HARDSUB_CONCURRENCY à la fois) : dossier de travail et message de
+    statut dédiés à ce job.
     """
     if not FC_API_KEY.strip():
-        await cancelTask("FreeConvert API key is missing in your Colab launcher.")
+        try:
+            await status_msg.edit_text("❌ FreeConvert API key is missing in your Colab launcher.")
+        except Exception:
+            pass
         return
 
-    if ospath.exists(Paths.temp_cc_path):
-        shutil.rmtree(Paths.temp_cc_path)
-    makedirs(Paths.temp_cc_path)
+    job_id = uuid.uuid4().hex[:8]
+    job_dir = f"{Paths.temp_cc_path}_{job_id}"
+    makedirs(job_dir, exist_ok=True)
 
-    try:
-        async def _process_cb(pct: float, detail: str) -> None:
-            overall = 10.0 + (max(0.0, min(pct, 100.0)) * 0.75)
-            await _seedr_status("FreeConvert Hardsub", "FreeConvert", overall, detail, name)
+    await _fc_job_status(status_msg, "FreeConvert Hardsub", "Queue", 0.0, "En attente d'un slot disponible...", name)
 
-        async def _download_cb(pct: float, detail: str) -> None:
-            overall = 85.0 + (max(0.0, min(pct, 100.0)) * 0.15)
-            await _seedr_status("FreeConvert Hardsub", "Download", overall, detail, name)
+    async with _fc_hardsub_semaphore:
+        try:
+            async def _process_cb(pct: float, detail: str) -> None:
+                overall = 10.0 + (max(0.0, min(pct, 100.0)) * 0.75)
+                await _fc_job_status(status_msg, "FreeConvert Hardsub", "FreeConvert", overall, detail, name)
 
-        await _seedr_status("FreeConvert Hardsub", "Queue", 5.0, "Submitting FreeConvert hardsub job", name)
-        await fc_hardsub_remote_url(
-            FC_API_KEY,
-            video_url,
-            name,
-            subtitle_path,
-            Paths.temp_cc_path,
-            quality_profile=BOT.Options.cc_quality_profile,
-            process_cb=_process_cb,
-            download_cb=_download_cb,
-        )
+            async def _download_cb(pct: float, detail: str) -> None:
+                overall = 85.0 + (max(0.0, min(pct, 100.0)) * 0.15)
+                await _fc_job_status(status_msg, "FreeConvert Hardsub", "Download", overall, detail, name)
 
-        await _seedr_status("FreeConvert Hardsub", "Upload", 100.0, "Uploading to Telegram")
-        await Leech(Paths.temp_cc_path, True, convert_videos=False)
-    except Exception as exc:
-        await cancelTask(f"FreeConvert hardsub (direct link) failed\n\n{exc}")
-    finally:
-        if ospath.exists(subtitle_path):
+            await _fc_job_status(status_msg, "FreeConvert Hardsub", "Queue", 5.0, "Submitting FreeConvert hardsub job", name)
+            await fc_hardsub_remote_url(
+                FC_API_KEY,
+                video_url,
+                name,
+                subtitle_path,
+                job_dir,
+                quality_profile=BOT.Options.cc_quality_profile,
+                process_cb=_process_cb,
+                download_cb=_download_cb,
+            )
+
+            await _fc_job_status(status_msg, "FreeConvert Hardsub", "Upload", 100.0, "Uploading to Telegram", name)
+            await Leech(job_dir, True, convert_videos=False)
             try:
-                os.remove(subtitle_path)
+                await status_msg.delete()
             except Exception:
                 pass
+        except Exception as exc:
+            try:
+                await status_msg.edit_text(f"❌ <b>FreeConvert hardsub failed</b>\n\n<code>{exc}</code>")
+            except Exception:
+                pass
+        finally:
+            if ospath.exists(subtitle_path):
+                try:
+                    os.remove(subtitle_path)
+                except Exception:
+                    pass
+            if ospath.exists(job_dir):
+                shutil.rmtree(job_dir, ignore_errors=True)
 
 
 async def Zip_Handler(down_path: str, is_split: bool, remove: bool):
