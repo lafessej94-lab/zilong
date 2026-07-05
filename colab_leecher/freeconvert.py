@@ -4,6 +4,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
@@ -158,7 +159,8 @@ async def _wait_for_job(
     raise RuntimeError(f"FreeConvert job {job_id} timed out.")
 
 
-async def _download_file(url: str, dest_path: str, progress_cb: ProgressCB = None) -> str:
+async def _download_file_aiohttp(url: str, dest_path: str, progress_cb: ProgressCB = None) -> str:
+    """Fallback mono-connexion (utilisé seulement si aria2c est indisponible)."""
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     async with aiohttp.ClientSession(timeout=_TIMEOUT_DOWNLOAD) as sess:
         async with sess.get(url) as resp:
@@ -167,13 +169,86 @@ async def _download_file(url: str, dest_path: str, progress_cb: ProgressCB = Non
             total = int(resp.headers.get("Content-Length") or 0)
             done = 0
             if progress_cb:
-                await progress_cb(0.0, "Téléchargement du résultat")
+                await progress_cb(0.0, "Téléchargement du résultat (mono-connexion)")
             with open(dest_path, "wb") as fh:
                 async for chunk in resp.content.iter_chunked(1024 * 512):
                     fh.write(chunk)
                     done += len(chunk)
                     if progress_cb and total > 0:
                         await progress_cb(min(100.0, done / total * 100.0), "Téléchargement du résultat")
+    if progress_cb:
+        await progress_cb(100.0, "Téléchargement terminé")
+    return dest_path
+
+
+def _parse_aria2_pct(line: str) -> Optional[float]:
+    """Extrait le pourcentage d'une ligne de log aria2c du style '12MiB/345MiB(3%)'."""
+    if "ETA:" not in line:
+        return None
+    try:
+        parts = line.split()
+        token = next((p for p in parts if "(" in p and ")" in p and "/" in p), None)
+        if not token:
+            return None
+        pct_str = token[token.find("(") + 1: token.find(")")]
+        match = re.findall(r"\d+\.\d+|\d+", pct_str)
+        if not match:
+            return None
+        return max(0.0, min(100.0, float(match[0])))
+    except Exception:
+        return None
+
+
+async def _download_file(url: str, dest_path: str, progress_cb: ProgressCB = None) -> str:
+    """
+    Télécharge le résultat FreeConvert via aria2c en multi-connexion (bien plus
+    rapide qu'un simple stream aiohttp mono-connexion). Retombe sur aiohttp si
+    aria2c n'est pas installé ou échoue.
+    """
+    dest_dir = os.path.dirname(dest_path) or "."
+    dest_name = os.path.basename(dest_path)
+    os.makedirs(dest_dir, exist_ok=True)
+
+    cmd = [
+        "aria2c",
+        "-x16", "-s16", "-k1M",
+        "--seed-time=0",
+        "--summary-interval=1",
+        "--max-tries=3",
+        "--console-log-level=notice",
+        "-d", dest_dir,
+        "-o", dest_name,
+        url,
+    ]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except FileNotFoundError:
+        log.warning("aria2c introuvable, fallback sur aiohttp mono-connexion.")
+        return await _download_file_aiohttp(url, dest_path, progress_cb)
+
+    if progress_cb:
+        await progress_cb(0.0, "Téléchargement (aria2c multi-connexion)")
+
+    assert proc.stdout is not None
+    while True:
+        line_bytes = await proc.stdout.readline()
+        if not line_bytes:
+            break
+        line = line_bytes.decode("utf-8", errors="replace")
+        pct = _parse_aria2_pct(line)
+        if pct is not None and progress_cb:
+            await progress_cb(pct, "Téléchargement (aria2c multi-connexion)")
+
+    code = await proc.wait()
+    if code != 0 or not os.path.exists(dest_path):
+        log.warning("aria2c a échoué (code %s), fallback sur aiohttp.", code)
+        return await _download_file_aiohttp(url, dest_path, progress_cb)
+
     if progress_cb:
         await progress_cb(100.0, "Téléchargement terminé")
     return dest_path
