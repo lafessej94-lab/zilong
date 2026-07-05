@@ -2,6 +2,7 @@ import math
 import logging
 import os
 import psutil
+import random
 import subprocess
 from time import time
 from datetime import datetime
@@ -182,13 +183,13 @@ def _probe_duration(file_path: str) -> float:
 
 
 def _extract_frame_ffmpeg(file_path: str, output_path: str, timestamp: float) -> bool:
-    """Extrait une frame HD (max 1280px de large, qualité quasi-lossless) via ffmpeg."""
+    """Extrait une frame en vrai 1080p (max 1920px de large, qualité quasi-lossless) via ffmpeg."""
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(int(timestamp)),
         "-i", file_path,
         "-vframes", "1",
-        "-vf", "scale='min(1280,iw)':-2",
+        "-vf", "scale='min(1920,iw)':-2",
         "-q:v", "2",
         output_path,
     ]
@@ -204,6 +205,10 @@ def thumbMaintainer(file_path):
     """
     Génère/retourne la thumbnail à utiliser pour l'upload.
     Ordre de priorité: thumbnail custom utilisateur > thumbnail ytdl > extraction ffmpeg HD.
+    La frame est prise à un instant ALÉATOIRE de la vidéo (entre 10% et 90%
+    de la durée, pour éviter les génériques/écrans noirs en tout début/fin)
+    plutôt que toujours au milieu exact — chaque upload a donc une thumbnail
+    différente même pour un même fichier.
     """
     if ospath.exists(Paths.VIDEO_FRAME):
         os.remove(Paths.VIDEO_FRAME)
@@ -218,7 +223,7 @@ def thumbMaintainer(file_path):
     if ospath.exists(ytdl_thumb):
         return convertIMG(ytdl_thumb), duration
 
-    timestamp = duration / 2 if duration else 1
+    timestamp = random.uniform(duration * 0.1, duration * 0.9) if duration > 1 else 1
     if _extract_frame_ffmpeg(file_path, Paths.VIDEO_FRAME, timestamp):
         return Paths.VIDEO_FRAME, duration
 
