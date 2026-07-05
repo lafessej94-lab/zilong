@@ -9,6 +9,7 @@ import subprocess
 from datetime import datetime
 from asyncio import sleep, get_event_loop
 from urllib.parse import urlparse
+from uuid import uuid4
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -40,9 +41,17 @@ from colab_leecher.stream_extractor import (
 BOT.Options.auto_forward = str(DUMP_ID or "").strip() not in ("", "0")
 BOT.Setting.auto_forward = "On" if BOT.Options.auto_forward else "Off"
 
-# Petit état en mémoire : chat_id -> {"url":..., "name":...}
-# Utilisé le temps qu'un utilisateur envoie son fichier de sous-titres après
-# avoir cliqué sur "FC Hardsub" (lien direct, sans extraction automatique).
+# ── État en mémoire pour le hardsub FreeConvert concurrent ──────────────────
+# _link_sessions : message_id (du message "Choose mode:") -> liste de sources.
+#   Nécessaire pour que plusieurs liens envoyés d'affilée ne se marchent pas
+#   dessus sur le global BOT.SOURCE — chaque bouton "mode" retrouve SON lien
+#   via le message auquel il est attaché, pas via BOT.SOURCE (qui ne reflète
+#   que le tout dernier lien envoyé).
+# _pending_fc_subtitle : message_id (du message "Envoie le sous-titre...") ->
+#   {"url":..., "name":...}. Permet plusieurs hardsub FC en attente de
+#   sous-titre en même temps — l'utilisateur répond (reply) au bon message
+#   avec le bon fichier pour lever l'ambiguïté.
+_link_sessions: dict[int, list[str]] = {}
 _pending_fc_subtitle: dict[int, dict] = {}
 
 
@@ -157,7 +166,7 @@ async def _startup_welcome() -> None:
             display = first.replace("<", "&lt;").replace(">", "&gt;")
             text = (
                 f"👋 <b>Welcome back, {display}</b>\n"
-                "⚡ <b>Zilong is online</b>\n\n"
+                "⚡ <b>Sae is online</b>\n\n"
                 "Send a link, magnet, or path to begin.\n"
                 "Use /start for the full menu and /status for the live dashboard."
             )
@@ -591,10 +600,11 @@ async def handle_url(client, message):
     n     = len([l for l in src if l.strip()])
     label = "🏮 YTDL" if BOT.Mode.ytdl else "🔗 Link"
 
-    await message.reply_text(
+    sent = await message.reply_text(
         f"{label}  ·  <code>{n}</code> source(s)\n<b>Choose mode:</b>",
         reply_markup=_mode_keyboard(), quote=True,
     )
+    _link_sessions[sent.id] = src
 
 
 # ══════════════════════════════════════════════
@@ -733,22 +743,19 @@ async def callbacks(client, cq):
         TaskInfo.reset()
         return
 
-    if data in ["seedr_cc_convert", "seedr_cc_hardsub", "seedr_fc_hardsub"]:
-        needs_cc = data in ("seedr_cc_convert", "seedr_cc_hardsub")
-        needs_fc = data == "seedr_fc_hardsub"
-
-        if needs_cc and not CC_API_KEY.strip():
+    if data in ["seedr_cc_convert", "seedr_cc_hardsub"]:
+        if not CC_API_KEY.strip():
             await cq.answer("CloudConvert API key is missing in your Colab launcher.", show_alert=True)
-            return
-        if needs_fc and not FC_API_KEY.strip():
-            await cq.answer("FreeConvert API key is missing in your Colab launcher.", show_alert=True)
             return
         if not str(SEEDR_USERNAME or "").strip() or not str(SEEDR_PASSWORD or "").strip():
             await cq.answer("Seedr credentials are missing in your Colab launcher.", show_alert=True)
             return
-        magnet = (BOT.SOURCE or [""])[0].strip()
+        magnet = _link_sessions.get(cq.message.id, BOT.SOURCE or [""])[0].strip()
         if not magnet.startswith("magnet:?xt=urn:btih:"):
             await cq.answer("Seedr mode currently needs a magnet link.", show_alert=True)
+            return
+        if BOT.State.task_going:
+            await cq.answer("A task is already running — /cancel first.", show_alert=True)
             return
 
         await cq.message.delete()
@@ -764,47 +771,71 @@ async def callbacks(client, cq):
         BOT.State.started = False
         BotTimes.start_time = datetime.now()
         TaskInfo.reset()
-        engine_label = "Seedr+FreeConvert" if needs_fc else "Seedr+CloudConvert"
-        TaskInfo.set(phase="process", engine=engine_label, started_at=datetime.now().timestamp())
+        TaskInfo.set(phase="process", engine="Seedr+CloudConvert", started_at=datetime.now().timestamp())
         BOT.Mode.type = data
         if data == "seedr_cc_convert":
             BOT.TASK = get_event_loop().create_task(Seedr_CC_Convert_Handler(magnet))
-        elif data == "seedr_cc_hardsub":
-            BOT.TASK = get_event_loop().create_task(Seedr_CC_Hardsub_Handler(magnet))
         else:
-            BOT.TASK = get_event_loop().create_task(Seedr_FC_Hardsub_Handler(magnet))
+            BOT.TASK = get_event_loop().create_task(Seedr_CC_Hardsub_Handler(magnet))
         await BOT.TASK
         BOT.State.task_going = False
         TaskInfo.reset()
         return
 
+    # ── FreeConvert Hardsub (magnet) — CONCURRENT, jusqu'à 3 en parallèle ──
+    # Ne bloque pas sur BOT.State.task_going : peut tourner en même temps
+    # qu'un autre hardsub FC, ou même pendant un leech normal en cours.
+    if data == "seedr_fc_hardsub":
+        if not FC_API_KEY.strip():
+            await cq.answer("FreeConvert API key is missing in your Colab launcher.", show_alert=True)
+            return
+        if not str(SEEDR_USERNAME or "").strip() or not str(SEEDR_PASSWORD or "").strip():
+            await cq.answer("Seedr credentials are missing in your Colab launcher.", show_alert=True)
+            return
+        magnet = _link_sessions.get(cq.message.id, BOT.SOURCE or [""])[0].strip()
+        if not magnet.startswith("magnet:?xt=urn:btih:"):
+            await cq.answer("Seedr mode currently needs a magnet link.", show_alert=True)
+            return
+
+        await cq.answer("🆓 Hardsub FreeConvert démarré (en parallèle)")
+        await cq.message.delete()
+        job_status_msg = await colab_bot.send_message(
+            chat_id=OWNER,
+            text="⏳ <i>Starting Seedr + FreeConvert hardsub job...</i>",
+        )
+        get_event_loop().create_task(Seedr_FC_Hardsub_Handler(magnet, job_status_msg))
+        return
+
     # ── FreeConvert Hardsub sur lien direct (sous-titre fourni manuellement) ──
+    # Concurrent lui aussi. Le sous-titre est associé via reply-to-message,
+    # pour supporter plusieurs demandes en attente simultanément.
     if data == "fc_hardsub_manual":
         if not FC_API_KEY.strip():
             await cq.answer("FreeConvert API key is missing in your Colab launcher.", show_alert=True)
             return
-        url = (BOT.SOURCE or [""])[0].strip()
+        url = _link_sessions.get(cq.message.id, BOT.SOURCE or [""])[0].strip()
         if not (url.startswith("http://") or url.startswith("https://")):
             await cq.answer("This option needs a direct HTTP(S) link.", show_alert=True)
             return
 
         name = os.path.basename(urlparse(url).path) or "video.mp4"
-        _pending_fc_subtitle[chat_id] = {"url": url, "name": name}
 
-        await cq.message.edit_text(
+        prompt = await cq.message.edit_text(
             "🆓 <b>FREECONVERT HARDSUB</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"<code>{name}</code>\n\n"
-            "📎 Envoie maintenant le fichier de sous-titres "
-            "(<code>.ass</code> ou <code>.srt</code>) à utiliser pour le hardsub.\n\n"
-            "<i>Le style (police, gras, contour...) sera appliqué automatiquement.</i>",
+            "📎 <b>Réponds à ce message</b> (reply) avec le fichier de sous-titres "
+            "(<code>.ass</code> ou <code>.srt</code>) à utiliser.\n\n"
+            "<i>Le style (police, gras, contour...) sera appliqué automatiquement. "
+            "Tu peux lancer un autre lien pendant que celui-ci tourne.</i>",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("✖ Annuler", callback_data="fc_hardsub_cancel"),
             ]]),
         )
+        _pending_fc_subtitle[prompt.id] = {"url": url, "name": name}
         return
 
     if data == "fc_hardsub_cancel":
-        _pending_fc_subtitle.pop(chat_id, None)
+        _pending_fc_subtitle.pop(cq.message.id, None)
         await cq.message.edit_text("❌ Hardsub annulé.")
         return
 
@@ -1129,13 +1160,26 @@ async def handle_photo(client, message):
 
 @colab_bot.on_message(filters.document & filters.private)
 async def handle_subtitle_document(client, message):
-    chat_id = message.chat.id
-    pending = _pending_fc_subtitle.get(chat_id)
-    if not pending:
-        return  # Aucun hardsub en attente de sous-titre, on ignore ce fichier
-
     if not _owner(message):
         return
+    if not _pending_fc_subtitle:
+        return  # Aucun hardsub en attente de sous-titre, on ignore ce fichier
+
+    # 1. Priorité au reply explicite (lève l'ambiguïté si plusieurs en attente)
+    reply_id = message.reply_to_message_id
+    pending = _pending_fc_subtitle.get(reply_id) if reply_id else None
+
+    # 2. Fallback : s'il n'y a qu'UNE seule demande en attente, pas besoin de reply
+    if pending is None:
+        if len(_pending_fc_subtitle) == 1:
+            reply_id, pending = next(iter(_pending_fc_subtitle.items()))
+        else:
+            await message.reply_text(
+                "⚠️ Plusieurs hardsub sont en attente d'un sous-titre — "
+                "réponds (reply) directement au message concerné avec ce fichier.",
+                quote=True,
+            )
+            return
 
     file_name = message.document.file_name or ""
     ext = os.path.splitext(file_name)[1].lower()
@@ -1146,32 +1190,20 @@ async def handle_subtitle_document(client, message):
         )
         return
 
-    if BOT.State.task_going:
-        await message.reply_text("⚠️ Task running — /cancel first.", quote=True)
-        return
-
-    _pending_fc_subtitle.pop(chat_id, None)
+    _pending_fc_subtitle.pop(reply_id, None)
 
     status_msg = await message.reply_text("⏳ <i>Sous-titre reçu, démarrage du hardsub...</i>")
     await message.delete()
 
     os.makedirs(Paths.WORK_PATH, exist_ok=True)
-    subtitle_path = os.path.join(Paths.WORK_PATH, f"manual_sub{ext}")
+    subtitle_path = os.path.join(Paths.WORK_PATH, f"manual_sub_{uuid4().hex[:8]}{ext}")
     await message.download(file_name=subtitle_path)
 
-    BOT.State.task_going = True
-    BOT.State.started = False
-    BotTimes.start_time = datetime.now()
-    TaskInfo.reset()
-    TaskInfo.set(phase="process", engine="FreeConvert", started_at=datetime.now().timestamp())
-    MSG.status_msg = status_msg
-    BOT.Mode.type = "fc_hardsub_manual"
-    BOT.TASK = get_event_loop().create_task(
-        Direct_FC_Hardsub_Handler(pending["url"], pending["name"], subtitle_path)
+    # Fire-and-forget : ne bloque pas ce handler, donc le bot reste réactif
+    # pour recevoir d'autres liens/sous-titres pendant que celui-ci tourne.
+    get_event_loop().create_task(
+        Direct_FC_Hardsub_Handler(pending["url"], pending["name"], subtitle_path, status_msg)
     )
-    await BOT.TASK
-    BOT.State.task_going = False
-    TaskInfo.reset()
 
 
 # ══════════════════════════════════════════════
