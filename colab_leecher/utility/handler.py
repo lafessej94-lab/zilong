@@ -612,6 +612,54 @@ async def Seedr_FC_Hardsub_Handler(magnet: str) -> None:
             await _del_folder(seedr_user, seedr_pwd, folder_id)
 
 
+async def Direct_FC_Hardsub_Handler(video_url: str, name: str, subtitle_path: str) -> None:
+    """
+    Hardsub FreeConvert sur un lien direct (ex: lien Seedr, lien HTTP classique),
+    avec un fichier de sous-titres fourni manuellement par l'utilisateur —
+    pas de Seedr, pas d'extraction automatique de piste sub, pas de sonde
+    ffprobe. On envoie juste video_url + le sous-titre reçu à FreeConvert.
+    """
+    if not FC_API_KEY.strip():
+        await cancelTask("FreeConvert API key is missing in your Colab launcher.")
+        return
+
+    if ospath.exists(Paths.temp_cc_path):
+        shutil.rmtree(Paths.temp_cc_path)
+    makedirs(Paths.temp_cc_path)
+
+    try:
+        async def _process_cb(pct: float, detail: str) -> None:
+            overall = 10.0 + (max(0.0, min(pct, 100.0)) * 0.75)
+            await _seedr_status("FreeConvert Hardsub", "FreeConvert", overall, detail, name)
+
+        async def _download_cb(pct: float, detail: str) -> None:
+            overall = 85.0 + (max(0.0, min(pct, 100.0)) * 0.15)
+            await _seedr_status("FreeConvert Hardsub", "Download", overall, detail, name)
+
+        await _seedr_status("FreeConvert Hardsub", "Queue", 5.0, "Submitting FreeConvert hardsub job", name)
+        await fc_hardsub_remote_url(
+            FC_API_KEY,
+            video_url,
+            name,
+            subtitle_path,
+            Paths.temp_cc_path,
+            quality_profile=BOT.Options.cc_quality_profile,
+            process_cb=_process_cb,
+            download_cb=_download_cb,
+        )
+
+        await _seedr_status("FreeConvert Hardsub", "Upload", 100.0, "Uploading to Telegram")
+        await Leech(Paths.temp_cc_path, True, convert_videos=False)
+    except Exception as exc:
+        await cancelTask(f"FreeConvert hardsub (direct link) failed\n\n{exc}")
+    finally:
+        if ospath.exists(subtitle_path):
+            try:
+                os.remove(subtitle_path)
+            except Exception:
+                pass
+
+
 async def Zip_Handler(down_path: str, is_split: bool, remove: bool):
     Messages.status_head = f"🗜 <b>COMPRESSING</b>\n\n<code>{Messages.download_name}</code>\n"
     TaskInfo.set(phase="process", engine="zip", filename=Messages.download_name)
