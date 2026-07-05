@@ -19,38 +19,45 @@ from os import path as ospath
 
 @dataclass(frozen=True)
 class AssStyle:
-    fontname: str = "Trebuchet MS"       # police claire, lisible, pas trop "carrée"
-    fontsize: int = 20
+    fontname: str = "Trebuchet MS"
+    fontsize: int = 23
     primary_colour: str = "&H00FFFFFF"   # blanc pur (format ASS: &HAABBGGRR)
     secondary_colour: str = "&H000000FF"
     outline_colour: str = "&H00000000"   # contour noir
-    back_colour: str = "&H80000000"      # ombre semi-transparente (alpha 80 = ~50%)
+    back_colour: str = "&H00000000"      # pas d'ombre (Shadow=0 ci-dessous)
     bold: int = -1                       # -1 = gras activé en ASS (0 = désactivé)
     italic: int = 0
     border_style: int = 1                # 1 = contour + ombre, 3 = boîte pleine
-    outline: float = 1.8                 # contour fin mais visible
-    shadow: float = 0.8                  # légère ombre portée, pas agressive
+    outline: float = 2.5
+    shadow: float = 0
     alignment: int = 2                   # 2 = bas centré (numpad ASS)
     margin_l: int = 20
     margin_r: int = 20
-    margin_v: int = 24
+    margin_v: int = 20
 
 
-# Style par défaut : rendu "anime hardsub classique" avec ombre bien présente
+# Style par défaut : repris tel quel du style "Default" fourni par l'utilisateur
 DEFAULT_HARDSUB_STYLE = AssStyle()
 
-# Résolution de référence du script — les valeurs ci-dessus (fontsize, outline,
-# shadow, margins) sont calibrées pour du 1920x1080. ASS scale automatiquement
-# le rendu à partir de PlayResX/PlayResY, donc on les force nous-mêmes plutôt
-# que de garder ceux (parfois différents) du fichier .ass d'origine.
-PLAY_RES_X = 1920
-PLAY_RES_Y = 1080
+# Résolution de référence du script — DOIT matcher celle du fichier source
+# (640x360), sinon la taille de police ne sera pas à l'échelle correcte une
+# fois le style appliqué à une vraie vidéo 1080p (ASS scale le rendu selon
+# le ratio actual_resolution / PlayRes).
+PLAY_RES_X = 640
+PLAY_RES_Y = 360
 
 
 def _ass_style_line(style: AssStyle, name: str = "Default") -> str:
     """Construit la ligne 'Style:' au format ASS v4+."""
+    # Certains moteurs de burn-in "simplifiés" (dont FreeConvert) ignorent le
+    # flag Bold du style et se contentent de chercher la police par son nom
+    # exact. On ajoute donc "Bold" au nom de la police en plus du flag —
+    # double sécurité qui ne casse rien pour les moteurs qui respectent le
+    # flag normalement (testé/confirmé : forcer le nom donne le même rendu
+    # gras qu'un vrai Bold=-1, indépendamment du flag).
+    fontname = f"{style.fontname} Bold" if style.bold else style.fontname
     fields = [
-        name, style.fontname, str(style.fontsize),
+        name, fontname, str(style.fontsize),
         style.primary_colour, style.secondary_colour,
         style.outline_colour, style.back_colour,
         str(style.bold), str(style.italic),
@@ -90,6 +97,12 @@ def apply_hardsub_style(
     Force le style de rendu d'un sous-titre (.srt ou .ass) et écrit le résultat
     en .ass prêt à être envoyé à FreeConvert pour le hardsub.
 
+    Tous les styles nommés trouvés dans le fichier source (Default, Italique,
+    Sign, etc.) reçoivent le MÊME style uniforme (celui passé en paramètre) —
+    ça évite qu'une ligne de dialogue référencant un style autre que "Default"
+    (ex: un style "Italique" du fichier d'origine) ne tombe sur un style
+    manquant ou conserve un rendu non désiré (italique, police différente...).
+
     Retourne le chemin du fichier .ass stylé (= output_path).
     """
     ext = ospath.splitext(subtitle_path)[1].lower()
@@ -105,6 +118,29 @@ def apply_hardsub_style(
     with open(work_path, "r", encoding="utf-8-sig", errors="replace") as fh:
         lines = fh.readlines()
 
+    # 1er passage : on récupère les noms de tous les styles définis dans le
+    # fichier source, pour pouvoir leur appliquer à tous notre style uniforme.
+    style_names: list[str] = []
+    in_styles_scan = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.lower() in ("[v4+ styles]", "[v4 styles]"):
+            in_styles_scan = True
+            continue
+        if in_styles_scan:
+            if stripped.startswith("["):
+                in_styles_scan = False
+                continue
+            if stripped.lower().startswith("style:"):
+                name = stripped.split(":", 1)[1].split(",", 1)[0].strip()
+                if name and name not in style_names:
+                    style_names.append(name)
+    if not style_names:
+        style_names = ["Default"]
+
+    # 2e passage : on reconstruit le fichier en remplaçant tout le bloc de
+    # styles par une ligne "Style:" par nom trouvé, toutes identiques (notre
+    # style forcé).
     out_lines: list[str] = []
     in_styles_section = False
     styles_written = False
@@ -112,11 +148,12 @@ def apply_hardsub_style(
     for line in lines:
         stripped = line.strip()
 
-        if stripped.lower() == "[v4+ styles]" or stripped.lower() == "[v4 styles]":
+        if stripped.lower() in ("[v4+ styles]", "[v4 styles]"):
             in_styles_section = True
             out_lines.append("[V4+ Styles]\n")
             out_lines.append(_STYLE_FORMAT_HEADER + "\n")
-            out_lines.append(_ass_style_line(style) + "\n")
+            for name in style_names:
+                out_lines.append(_ass_style_line(style, name=name) + "\n")
             styles_written = True
             continue
 
@@ -138,7 +175,9 @@ def apply_hardsub_style(
             if line.strip().lower() == "[events]" and not inserted:
                 final_lines.append("[V4+ Styles]\n")
                 final_lines.append(_STYLE_FORMAT_HEADER + "\n")
-                final_lines.append(_ass_style_line(style) + "\n\n")
+                for name in style_names:
+                    final_lines.append(_ass_style_line(style, name=name) + "\n")
+                final_lines.append("\n")
                 inserted = True
             final_lines.append(line)
         out_lines = final_lines
