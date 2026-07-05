@@ -8,12 +8,14 @@ import json
 import subprocess
 from datetime import datetime
 from asyncio import sleep, get_event_loop
+from urllib.parse import urlparse
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from colab_leecher import CC_API_KEY, FC_API_KEY, DUMP_ID, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot, OWNER
 from colab_leecher.cloudconvert import cc_mode_label, quality_label, resize_label
 from colab_leecher.utility.handler import (
+    Direct_FC_Hardsub_Handler,
     Seedr_CC_Convert_Handler,
     Seedr_CC_Hardsub_Handler,
     Seedr_FC_Hardsub_Handler,
@@ -37,6 +39,11 @@ from colab_leecher.stream_extractor import (
 
 BOT.Options.auto_forward = str(DUMP_ID or "").strip() not in ("", "0")
 BOT.Setting.auto_forward = "On" if BOT.Options.auto_forward else "Off"
+
+# Petit état en mémoire : chat_id -> {"url":..., "name":...}
+# Utilisé le temps qu'un utilisateur envoie son fichier de sous-titres après
+# avoir cliqué sur "FC Hardsub" (lien direct, sans extraction automatique).
+_pending_fc_subtitle: dict[int, dict] = {}
 
 
 def _pick_stream_source_file(root: str) -> str | None:
@@ -548,6 +555,10 @@ def _mode_keyboard():
         rows.append([
             InlineKeyboardButton("🆓 Seedr+FC Hardsub", callback_data="seedr_fc_hardsub"),
         ])
+    elif first.startswith("http://") or first.startswith("https://"):
+        rows.append([
+            InlineKeyboardButton("🆓 FC Hardsub", callback_data="fc_hardsub_manual"),
+        ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -765,6 +776,36 @@ async def callbacks(client, cq):
         await BOT.TASK
         BOT.State.task_going = False
         TaskInfo.reset()
+        return
+
+    # ── FreeConvert Hardsub sur lien direct (sous-titre fourni manuellement) ──
+    if data == "fc_hardsub_manual":
+        if not FC_API_KEY.strip():
+            await cq.answer("FreeConvert API key is missing in your Colab launcher.", show_alert=True)
+            return
+        url = (BOT.SOURCE or [""])[0].strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            await cq.answer("This option needs a direct HTTP(S) link.", show_alert=True)
+            return
+
+        name = os.path.basename(urlparse(url).path) or "video.mp4"
+        _pending_fc_subtitle[chat_id] = {"url": url, "name": name}
+
+        await cq.message.edit_text(
+            "🆓 <b>FREECONVERT HARDSUB</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<code>{name}</code>\n\n"
+            "📎 Envoie maintenant le fichier de sous-titres "
+            "(<code>.ass</code> ou <code>.srt</code>) à utiliser pour le hardsub.\n\n"
+            "<i>Le style (police, gras, contour...) sera appliqué automatiquement.</i>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✖ Annuler", callback_data="fc_hardsub_cancel"),
+            ]]),
+        )
+        return
+
+    if data == "fc_hardsub_cancel":
+        _pending_fc_subtitle.pop(chat_id, None)
+        await cq.message.edit_text("❌ Hardsub annulé.")
         return
 
     # ════════════════════════════════════════════
@@ -1080,6 +1121,57 @@ async def handle_photo(client, message):
         await msg.edit_text("❌ Could not set thumbnail.")
     await sleep(10)
     await message_deleter(message, msg)
+
+
+# ══════════════════════════════════════════════
+#  Document → sous-titre pour FC Hardsub manuel
+# ══════════════════════════════════════════════
+
+@colab_bot.on_message(filters.document & filters.private)
+async def handle_subtitle_document(client, message):
+    chat_id = message.chat.id
+    pending = _pending_fc_subtitle.get(chat_id)
+    if not pending:
+        return  # Aucun hardsub en attente de sous-titre, on ignore ce fichier
+
+    if not _owner(message):
+        return
+
+    file_name = message.document.file_name or ""
+    ext = os.path.splitext(file_name)[1].lower()
+    if ext not in (".ass", ".srt", ".ssa"):
+        await message.reply_text(
+            "❌ Envoie un fichier <code>.ass</code> ou <code>.srt</code> valide.",
+            quote=True,
+        )
+        return
+
+    if BOT.State.task_going:
+        await message.reply_text("⚠️ Task running — /cancel first.", quote=True)
+        return
+
+    _pending_fc_subtitle.pop(chat_id, None)
+
+    status_msg = await message.reply_text("⏳ <i>Sous-titre reçu, démarrage du hardsub...</i>")
+    await message.delete()
+
+    os.makedirs(Paths.WORK_PATH, exist_ok=True)
+    subtitle_path = os.path.join(Paths.WORK_PATH, f"manual_sub{ext}")
+    await message.download(file_name=subtitle_path)
+
+    BOT.State.task_going = True
+    BOT.State.started = False
+    BotTimes.start_time = datetime.now()
+    TaskInfo.reset()
+    TaskInfo.set(phase="process", engine="FreeConvert", started_at=datetime.now().timestamp())
+    MSG.status_msg = status_msg
+    BOT.Mode.type = "fc_hardsub_manual"
+    BOT.TASK = get_event_loop().create_task(
+        Direct_FC_Hardsub_Handler(pending["url"], pending["name"], subtitle_path)
+    )
+    await BOT.TASK
+    BOT.State.task_going = False
+    TaskInfo.reset()
 
 
 # ══════════════════════════════════════════════
