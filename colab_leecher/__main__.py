@@ -59,10 +59,16 @@ _pending_fc_subtitle: dict[int, dict] = {}
 # _pending_media : message_id (du message avec les boutons d'action) ->
 #   {"video_path": ...} ou {"audio_path": ...} — le fichier local déjà téléchargé.
 # _pending_media_input : message_id (du prompt "envoie le fichier compagnon") ->
-#   {"action": "merge"|"hardsub", "video_path": ...} — en attente d'un reply
-#   avec le fichier audio (merge) ou sous-titre (hardsub local).
+#   {"action": "hardsub", "video_path": ...} — en attente d'un reply
+#   avec le sous-titre (hardsub local uniquement).
 _pending_media: dict[int, dict] = {}
 _pending_media_input: dict[int, dict] = {}
+
+# ── NEW — État global pour Merge Audio+Video, SANS dépendre du reply Telegram.
+# Bot mono-utilisateur (OWNER only) → une seule fusion en attente à la fois
+# suffit. Dès qu'un audio arrive (envoyé normalement OU en reply, peu importe),
+# s'il y a une fusion en attente, elle est utilisée directement.
+_pending_merge: dict = {}  # clé "video_msg_id" présente ⇔ une fusion attend un audio
 
 
 # ══════════════════════════════════════════════
@@ -701,15 +707,8 @@ def _video_tools_keyboard(msg_id: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("🎞 Stream Extractor",   callback_data=f"mt_streams|{msg_id}")],
         [InlineKeyboardButton("💬 Hardsub Local",      callback_data=f"mt_hardsub|{msg_id}"),
          InlineKeyboardButton("📸 Screenshot",          callback_data=f"mt_shot|{msg_id}")],
-        [InlineKeyboardButton("🔇 Remove Audio",       callback_data=f"mt_noaudio|{msg_id}"),
-         InlineKeyboardButton("🔄 Audio Converter",     callback_data=f"mt_audioconv|{msg_id}")],
+        [InlineKeyboardButton("🔇 Remove Audio",       callback_data=f"mt_noaudio|{msg_id}")],
     ])
-
-
-def _audio_tools_keyboard(msg_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🎵 Convertir en MP3", callback_data=f"mt_audio_mp3|{msg_id}"),
-    ]])
 
 
 @colab_bot.on_message(filters.video & filters.private)
@@ -745,56 +744,41 @@ async def handle_incoming_audio(client, message):
     if not _owner(message):
         return
 
-    # ── Si c'est un reply à un prompt "Merge" en attente, traiter cet audio
-    # comme fichier compagnon au lieu d'ouvrir un nouveau menu. Nécessaire
-    # car Telegram envoie souvent les fichiers audio comme type "audio" et
-    # non "document", donc l'ancien handler (document-only) les ratait.
-    reply_id = message.reply_to_message_id
-    if reply_id in _pending_media_input:
-        pending = _pending_media_input.get(reply_id)
-        if pending["action"] == "merge":
-            file_name = message.audio.file_name or "audio.mp3"
-            ext = os.path.splitext(file_name)[1].lower() or ".mp3"
-            _pending_media_input.pop(reply_id, None)
-            os.makedirs(Paths.WORK_PATH, exist_ok=True)
-            local_path = os.path.join(Paths.WORK_PATH, f"companion_{uuid4().hex[:8]}{ext}")
-            status = await message.reply_text("⏳ <i>Starting...</i>")
-            await message.download(
-                file_name=local_path,
-                progress=await _make_dl_progress_cb(status, "TÉLÉCHARGEMENT AUDIO"),
-            )
-            await message.delete()
-            try:
-                video_path = await _ensure_local_video(pending["video_msg_id"], client, status)
-                out = await media_tools.merge_audio_video(video_path, local_path, status)
-                from colab_leecher.uploader.telegram import upload_file
-                await upload_file(out, os.path.basename(out), is_last=True)
-                await status.delete()
-            except Exception as e:
-                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
-            return
-        # "hardsub" n'attend jamais un audio — on tombe dans le comportement normal.
-
-    if BOT.State.task_going:
-        msg = await message.reply_text("⚠️ Task running — /cancel first.", quote=True)
-        await sleep(8); await msg.delete()
+    # ── Priorité absolue : s'il y a une fusion en attente d'un audio, cet
+    # audio EST le fichier compagnon — peu importe si le message est un
+    # reply ou juste envoyé normalement. Plus besoin de "répondre" au bot.
+    if "video_msg_id" in _pending_merge:
+        video_msg_id = _pending_merge.pop("video_msg_id")
+        file_name = message.audio.file_name or "audio.mp3"
+        ext = os.path.splitext(file_name)[1].lower() or ".mp3"
+        os.makedirs(Paths.WORK_PATH, exist_ok=True)
+        local_path = os.path.join(Paths.WORK_PATH, f"companion_{uuid4().hex[:8]}{ext}")
+        status = await message.reply_text("⏳ <i>Starting...</i>")
+        await message.download(
+            file_name=local_path,
+            progress=await _make_dl_progress_cb(status, "TÉLÉCHARGEMENT AUDIO"),
+        )
+        await message.delete()
+        try:
+            video_path = await _ensure_local_video(video_msg_id, client, status)
+            out = await media_tools.merge_audio_video(video_path, local_path, status)
+            from colab_leecher.uploader.telegram import upload_file
+            await upload_file(out, os.path.basename(out), is_last=True)
+            await status.delete()
+        except Exception as e:
+            await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
         return
 
-    file_label = message.audio.file_name or "audio.mp3"
-
-    # Même principe : menu instantané, téléchargement seulement au clic.
-    status = await message.reply_text(
-        "🎵 <b>OUTILS AUDIO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<code>{file_label}</code>\n\n"
-        "Choisis une action :",
+    # ── Aucune fusion en attente → "Audio Converter" a été supprimé (inutile).
+    # On informe juste l'utilisateur au lieu d'ouvrir un menu.
+    msg = await message.reply_text(
+        "ℹ️ <b>Aucune fusion en attente.</b>\n\n"
+        "Envoie une vidéo, clique sur <b>🎬 Merge Audio+Video</b>, "
+        "puis envoie ton fichier audio — il sera utilisé automatiquement.",
         quote=True,
     )
-    _pending_media[status.id] = {
-        "audio_file_id": message.audio.file_id,
-        "audio_file_name": file_label,
-    }
-    await status.edit_reply_markup(_audio_tools_keyboard(status.id))
-    await message.delete()
+    await sleep(10)
+    await message_deleter(message, msg)
 
 
 # ══════════════════════════════════════════════
@@ -1218,75 +1202,22 @@ async def callbacks(client, cq):
                 await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
             return
 
-        # ── Audio Converter (menu de formats) ──
-        if action == "mt_audioconv":
-            msg_id = int(parts[1])
-            if not _pending_media.get(msg_id):
-                await cq.answer("Session expirée — renvoie le fichier.", show_alert=True); return
-            await cq.answer()
-            await cq.message.edit_text(
-                "🔄 <b>AUDIO CONVERTER</b>\n\nChoisis le format de sortie :",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("MP3", callback_data=f"mt_ac_fmt|mp3|{msg_id}"),
-                     InlineKeyboardButton("M4A", callback_data=f"mt_ac_fmt|m4a|{msg_id}")],
-                    [InlineKeyboardButton("WAV", callback_data=f"mt_ac_fmt|wav|{msg_id}"),
-                     InlineKeyboardButton("OGG", callback_data=f"mt_ac_fmt|ogg|{msg_id}")],
-                ]),
-            )
-            return
-
-        if action == "mt_ac_fmt":
-            fmt, msg_id = parts[1], int(parts[2])
-            session = _pending_media.get(msg_id)
-            if not session:
-                await cq.answer("Session expirée.", show_alert=True); return
-            await cq.answer(f"🔄 Conversion en {fmt.upper()}...")
-            status = await cq.message.edit_text("⏳ <i>Starting...</i>")
-            try:
-                if "video_file_id" in session:
-                    src, from_video = await _ensure_local_video(msg_id, client, status), True
-                else:
-                    src, from_video = await _ensure_local_audio(msg_id, client, status), False
-                out = await media_tools.convert_audio(src, fmt, status, extract_from_video=from_video)
-                from colab_leecher.uploader.telegram import upload_file
-                await upload_file(out, os.path.basename(out), is_last=True)
-                await status.delete()
-            except Exception as e:
-                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
-            return
-
-        # ── Convertir en MP3 (raccourci direct pour un audio reçu) ──
-        if action == "mt_audio_mp3":
-            msg_id = int(parts[1])
-            if not _pending_media.get(msg_id):
-                await cq.answer("Session expirée.", show_alert=True); return
-            await cq.answer("🎵 Conversion en MP3...")
-            status = await cq.message.edit_text("⏳ <i>Starting...</i>")
-            try:
-                audio_path = await _ensure_local_audio(msg_id, client, status)
-                out = await media_tools.convert_audio(audio_path, "mp3", status)
-                from colab_leecher.uploader.telegram import upload_file
-                await upload_file(out, os.path.basename(out), is_last=True)
-                await status.delete()
-            except Exception as e:
-                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
-            return
-
         # ── Merge Audio+Video : demande le fichier audio compagnon ──
         # Le téléchargement de la vidéo n'a lieu que quand le fichier audio
-        # compagnon arrive (voir handle_subtitle_document / handle_incoming_audio)
-        # — pas ici.
+        # compagnon arrive (voir handle_incoming_audio / handle_subtitle_document).
+        # Pas besoin de reply : le prochain audio envoyé sera utilisé direct.
         if action == "mt_merge":
             msg_id = int(parts[1])
             session = _pending_media.get(msg_id)
             if not session:
                 await cq.answer("Session expirée — renvoie le fichier.", show_alert=True); return
-            prompt = await cq.message.edit_text(
+            _pending_merge["video_msg_id"] = msg_id
+            await cq.message.edit_text(
                 "🎬 <b>MERGE AUDIO + VIDEO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"<code>{session.get('video_file_name', 'video')}</code>\n\n"
-                "📎 <b>Réponds à ce message</b> (reply) avec le fichier audio à fusionner.",
+                "📎 <b>Envoie maintenant le fichier audio</b> à fusionner — "
+                "pas besoin de répondre (reply), envoie-le simplement.",
             )
-            _pending_media_input[prompt.id] = {"action": "merge", "video_msg_id": msg_id}
             await cq.answer()
             return
 
