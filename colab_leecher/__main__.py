@@ -36,6 +36,7 @@ from colab_leecher.stream_extractor import (
     kb_type, kb_video, kb_audio, kb_subs,
     dl_video, dl_audio, dl_sub,
 )
+from colab_leecher import media_tools  # NEW — outils vidéo/audio directs
 
 
 BOT.Options.auto_forward = str(DUMP_ID or "").strip() not in ("", "0")
@@ -53,6 +54,15 @@ BOT.Setting.auto_forward = "On" if BOT.Options.auto_forward else "Off"
 #   avec le bon fichier pour lever l'ambiguïté.
 _link_sessions: dict[int, list[str]] = {}
 _pending_fc_subtitle: dict[int, dict] = {}
+
+# ── NEW — État en mémoire pour les Media Tools (fichier envoyé directement) ─
+# _pending_media : message_id (du message avec les boutons d'action) ->
+#   {"video_path": ...} ou {"audio_path": ...} — le fichier local déjà téléchargé.
+# _pending_media_input : message_id (du prompt "envoie le fichier compagnon") ->
+#   {"action": "merge"|"hardsub", "video_path": ...} — en attente d'un reply
+#   avec le fichier audio (merge) ou sous-titre (hardsub local).
+_pending_media: dict[int, dict] = {}
+_pending_media_input: dict[int, dict] = {}
 
 
 def _pick_stream_source_file(root: str) -> str | None:
@@ -198,6 +208,7 @@ async def start(client, message):
         "🧲 Seedr + CloudConvert convert · hardsub\n"
         "🧲 Seedr + FreeConvert hardsub\n"
         "🎞 Stream Extractor (any link)\n"
+        "📎 Envoie une vidéo/audio directement pour les Media Tools\n"
         "📊 /status — live dashboard\n"
         "📡 /nyaa_search — anime search\n\n"
         "💡 /help for all commands",
@@ -249,6 +260,8 @@ async def help_cmd(client, message):
         "🧲 <b>Seedr + CC</b> — on magnet links, use Seedr+CC Convert / Hardsub\n"
         "🧲 <b>Seedr + FreeConvert</b> — on magnet links, use Seedr+FC Hardsub\n"
         "🎞 <b>Stream Extractor</b> — tap 🎞 Streams on any link\n"
+        "📎 <b>Media Tools</b> — envoie une vidéo (Merge, Hardsub Local, Screenshot, "
+        "Remove Audio, Audio Converter, Stream Extractor) ou un audio (Convertir en MP3)\n"
         "🖼 Send a <b>photo</b> to set thumbnail"
     )
     msg = await message.reply_text(text)
@@ -605,6 +618,79 @@ async def handle_url(client, message):
         reply_markup=_mode_keyboard(), quote=True,
     )
     _link_sessions[sent.id] = src
+
+
+# ══════════════════════════════════════════════
+#  NEW — Media Tools : vidéo / audio envoyés directement
+# ══════════════════════════════════════════════
+
+def _video_tools_keyboard(msg_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 Merge Audio+Video", callback_data=f"mt_merge|{msg_id}"),
+         InlineKeyboardButton("🎞 Stream Extractor",   callback_data=f"mt_streams|{msg_id}")],
+        [InlineKeyboardButton("💬 Hardsub Local",      callback_data=f"mt_hardsub|{msg_id}"),
+         InlineKeyboardButton("📸 Screenshot",          callback_data=f"mt_shot|{msg_id}")],
+        [InlineKeyboardButton("🔇 Remove Audio",       callback_data=f"mt_noaudio|{msg_id}"),
+         InlineKeyboardButton("🔄 Audio Converter",     callback_data=f"mt_audioconv|{msg_id}")],
+    ])
+
+
+def _audio_tools_keyboard(msg_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎵 Convertir en MP3", callback_data=f"mt_audio_mp3|{msg_id}"),
+    ]])
+
+
+@colab_bot.on_message(filters.video & filters.private)
+async def handle_incoming_video(client, message):
+    if not _owner(message):
+        return
+    if BOT.State.task_going:
+        msg = await message.reply_text("⚠️ Task running — /cancel first.", quote=True)
+        await sleep(8); await msg.delete()
+        return
+
+    status = await message.reply_text("⏳ <i>Téléchargement de la vidéo...</i>", quote=True)
+    os.makedirs(Paths.WORK_PATH, exist_ok=True)
+    file_label = message.video.file_name or "video.mp4"
+    local_path = await message.download(
+        file_name=os.path.join(Paths.WORK_PATH, f"in_{uuid4().hex[:8]}_{file_label}")
+    )
+
+    _pending_media[status.id] = {"video_path": local_path}
+    await status.edit_text(
+        "🎬 <b>OUTILS VIDÉO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<code>{os.path.basename(local_path)}</code>\n\n"
+        "Choisis une action :",
+        reply_markup=_video_tools_keyboard(status.id),
+    )
+    await message.delete()
+
+
+@colab_bot.on_message(filters.audio & filters.private)
+async def handle_incoming_audio(client, message):
+    if not _owner(message):
+        return
+    if BOT.State.task_going:
+        msg = await message.reply_text("⚠️ Task running — /cancel first.", quote=True)
+        await sleep(8); await msg.delete()
+        return
+
+    status = await message.reply_text("⏳ <i>Téléchargement de l'audio...</i>", quote=True)
+    os.makedirs(Paths.WORK_PATH, exist_ok=True)
+    file_label = message.audio.file_name or "audio.mp3"
+    local_path = await message.download(
+        file_name=os.path.join(Paths.WORK_PATH, f"in_{uuid4().hex[:8]}_{file_label}")
+    )
+
+    _pending_media[status.id] = {"audio_path": local_path}
+    await status.edit_text(
+        "🎵 <b>OUTILS AUDIO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<code>{os.path.basename(local_path)}</code>\n\n"
+        "Choisis une action :",
+        reply_markup=_audio_tools_keyboard(status.id),
+    )
+    await message.delete()
 
 
 # ══════════════════════════════════════════════
@@ -987,6 +1073,175 @@ async def callbacks(client, cq):
             except Exception: pass
         return
 
+    # ════════════════════════════════════════════
+    #  NEW — MEDIA TOOLS (fichier envoyé directement)
+    # ════════════════════════════════════════════
+
+    if data.startswith("mt_"):
+        parts  = data.split("|")
+        action = parts[0]
+
+        # ── Remove Audio (direct, pas d'input supplémentaire) ──
+        if action == "mt_noaudio":
+            msg_id = int(parts[1])
+            session = _pending_media.get(msg_id)
+            if not session:
+                await cq.answer("Session expirée — renvoie le fichier.", show_alert=True); return
+            await cq.answer("🔇 Suppression de l'audio...")
+            status = await cq.message.edit_text("⏳ <i>Starting...</i>")
+            try:
+                out = await media_tools.remove_audio(session["video_path"], status)
+                from colab_leecher.uploader.telegram import upload_file
+                await upload_file(out, os.path.basename(out), is_last=True)
+                await status.delete()
+            except Exception as e:
+                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
+            return
+
+        # ── Screenshot (direct, capture au milieu de la vidéo) ──
+        if action == "mt_shot":
+            msg_id = int(parts[1])
+            session = _pending_media.get(msg_id)
+            if not session:
+                await cq.answer("Session expirée — renvoie le fichier.", show_alert=True); return
+            await cq.answer("📸 Capture...")
+            status = await cq.message.edit_text("⏳ <i>Starting...</i>")
+            try:
+                out = await media_tools.take_screenshot(session["video_path"], status)
+                await colab_bot.send_photo(chat_id=OWNER, photo=out, caption=os.path.basename(session["video_path"]))
+                await status.delete()
+            except Exception as e:
+                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
+            return
+
+        # ── Audio Converter (menu de formats) ──
+        if action == "mt_audioconv":
+            msg_id = int(parts[1])
+            if not _pending_media.get(msg_id):
+                await cq.answer("Session expirée — renvoie le fichier.", show_alert=True); return
+            await cq.answer()
+            await cq.message.edit_text(
+                "🔄 <b>AUDIO CONVERTER</b>\n\nChoisis le format de sortie :",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("MP3", callback_data=f"mt_ac_fmt|mp3|{msg_id}"),
+                     InlineKeyboardButton("M4A", callback_data=f"mt_ac_fmt|m4a|{msg_id}")],
+                    [InlineKeyboardButton("WAV", callback_data=f"mt_ac_fmt|wav|{msg_id}"),
+                     InlineKeyboardButton("OGG", callback_data=f"mt_ac_fmt|ogg|{msg_id}")],
+                ]),
+            )
+            return
+
+        if action == "mt_ac_fmt":
+            fmt, msg_id = parts[1], int(parts[2])
+            session = _pending_media.get(msg_id)
+            if not session:
+                await cq.answer("Session expirée.", show_alert=True); return
+            src = session.get("video_path") or session.get("audio_path")
+            from_video = "video_path" in session
+            await cq.answer(f"🔄 Conversion en {fmt.upper()}...")
+            status = await cq.message.edit_text("⏳ <i>Starting...</i>")
+            try:
+                out = await media_tools.convert_audio(src, fmt, status, extract_from_video=from_video)
+                from colab_leecher.uploader.telegram import upload_file
+                await upload_file(out, os.path.basename(out), is_last=True)
+                await status.delete()
+            except Exception as e:
+                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
+            return
+
+        # ── Convertir en MP3 (raccourci direct pour un audio reçu) ──
+        if action == "mt_audio_mp3":
+            msg_id = int(parts[1])
+            session = _pending_media.get(msg_id)
+            if not session:
+                await cq.answer("Session expirée.", show_alert=True); return
+            await cq.answer("🎵 Conversion en MP3...")
+            status = await cq.message.edit_text("⏳ <i>Starting...</i>")
+            try:
+                out = await media_tools.convert_audio(session["audio_path"], "mp3", status)
+                from colab_leecher.uploader.telegram import upload_file
+                await upload_file(out, os.path.basename(out), is_last=True)
+                await status.delete()
+            except Exception as e:
+                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
+            return
+
+        # ── Merge Audio+Video : demande le fichier audio compagnon ──
+        if action == "mt_merge":
+            msg_id = int(parts[1])
+            session = _pending_media.get(msg_id)
+            if not session:
+                await cq.answer("Session expirée — renvoie le fichier.", show_alert=True); return
+            video_path = session["video_path"]
+            prompt = await cq.message.edit_text(
+                "🎬 <b>MERGE AUDIO + VIDEO</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"<code>{os.path.basename(video_path)}</code>\n\n"
+                "📎 <b>Réponds à ce message</b> (reply) avec le fichier audio à fusionner.",
+            )
+            _pending_media_input[prompt.id] = {"action": "merge", "video_path": video_path}
+            await cq.answer()
+            return
+
+        # ── Hardsub Local : demande le fichier de sous-titres ──
+        if action == "mt_hardsub":
+            msg_id = int(parts[1])
+            session = _pending_media.get(msg_id)
+            if not session:
+                await cq.answer("Session expirée — renvoie le fichier.", show_alert=True); return
+            video_path = session["video_path"]
+            prompt = await cq.message.edit_text(
+                "💬 <b>HARDSUB LOCAL</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"<code>{os.path.basename(video_path)}</code>\n\n"
+                "📎 <b>Réponds à ce message</b> (reply) avec le fichier <code>.srt</code> ou <code>.ass</code>.",
+            )
+            _pending_media_input[prompt.id] = {"action": "hardsub", "video_path": video_path}
+            await cq.answer()
+            return
+
+        # ── Stream Extractor sur le fichier local ──
+        if action == "mt_streams":
+            msg_id = int(parts[1])
+            session = _pending_media.get(msg_id)
+            if not session:
+                await cq.answer("Session expirée — renvoie le fichier.", show_alert=True); return
+            video_path = session["video_path"]
+            streams = media_tools.list_local_streams(video_path)
+            if not streams:
+                await cq.answer("Impossible de lire les pistes.", show_alert=True); return
+            rows = []
+            for s in streams:
+                if s["type"] == "video":
+                    label = f"🎬 {s['width']}x{s['height']} [{s['codec']}]"
+                elif s["type"] == "audio":
+                    label = f"🎵 {s['lang'] or '?'} [{s['codec']}]"
+                else:
+                    label = f"💬 {s['lang'] or '?'} [{s['codec']}]"
+                rows.append([InlineKeyboardButton(
+                    label, callback_data=f"mt_streamdl|{s['type']}|{s['index']}|{msg_id}",
+                )])
+            await cq.message.edit_text(
+                "🎞 <b>STREAM EXTRACTOR</b>\n\nPistes détectées, tape pour extraire :",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            await cq.answer()
+            return
+
+        if action == "mt_streamdl":
+            _, stype, sidx, msg_id = parts
+            session = _pending_media.get(int(msg_id))
+            if not session:
+                await cq.answer("Session expirée.", show_alert=True); return
+            await cq.answer("⬇️ Extraction...")
+            status = await cq.message.edit_text("⏳ <i>Starting...</i>")
+            try:
+                out = await media_tools.extract_local_stream(session["video_path"], int(sidx), stype, status)
+                from colab_leecher.uploader.telegram import upload_file
+                await upload_file(out, os.path.basename(out), is_last=True)
+                await status.delete()
+            except Exception as e:
+                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
+            return
+
     # ── Settings callbacks ─────────────────────
     if data == "video":
         await cq.message.edit_text(
@@ -1155,55 +1410,85 @@ async def handle_photo(client, message):
 
 
 # ══════════════════════════════════════════════
-#  Document → sous-titre pour FC Hardsub manuel
+#  Document → sous-titre pour FC Hardsub manuel, sous-titre/audio pour Media Tools
 # ══════════════════════════════════════════════
 
 @colab_bot.on_message(filters.document & filters.private)
 async def handle_subtitle_document(client, message):
     if not _owner(message):
         return
-    if not _pending_fc_subtitle:
-        return  # Aucun hardsub en attente de sous-titre, on ignore ce fichier
 
-    # 1. Priorité au reply explicite (lève l'ambiguïté si plusieurs en attente)
     reply_id = message.reply_to_message_id
-    pending = _pending_fc_subtitle.get(reply_id) if reply_id else None
 
-    # 2. Fallback : s'il n'y a qu'UNE seule demande en attente, pas besoin de reply
-    if pending is None:
-        if len(_pending_fc_subtitle) == 1:
-            reply_id, pending = next(iter(_pending_fc_subtitle.items()))
-        else:
+    # ── Cas 1 : sous-titre pour le hardsub FreeConvert existant (lien distant) ──
+    if reply_id in _pending_fc_subtitle:
+        pending = _pending_fc_subtitle.get(reply_id)
+        file_name = message.document.file_name or ""
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext not in (".ass", ".srt", ".ssa"):
             await message.reply_text(
-                "⚠️ Plusieurs hardsub sont en attente d'un sous-titre — "
-                "réponds (reply) directement au message concerné avec ce fichier.",
+                "❌ Envoie un fichier <code>.ass</code> ou <code>.srt</code> valide.",
                 quote=True,
             )
             return
-
-    file_name = message.document.file_name or ""
-    ext = os.path.splitext(file_name)[1].lower()
-    if ext not in (".ass", ".srt", ".ssa"):
-        await message.reply_text(
-            "❌ Envoie un fichier <code>.ass</code> ou <code>.srt</code> valide.",
-            quote=True,
+        _pending_fc_subtitle.pop(reply_id, None)
+        status_msg = await message.reply_text("⏳ <i>Sous-titre reçu, démarrage du hardsub...</i>")
+        await message.delete()
+        os.makedirs(Paths.WORK_PATH, exist_ok=True)
+        subtitle_path = os.path.join(Paths.WORK_PATH, f"manual_sub_{uuid4().hex[:8]}{ext}")
+        await message.download(file_name=subtitle_path)
+        get_event_loop().create_task(
+            Direct_FC_Hardsub_Handler(pending["url"], pending["name"], subtitle_path, status_msg)
         )
         return
 
-    _pending_fc_subtitle.pop(reply_id, None)
+    # ── Cas 2 : fichier compagnon pour Merge / Hardsub Local (Media Tools) ──
+    if reply_id in _pending_media_input:
+        pending = _pending_media_input.get(reply_id)
+        file_name = message.document.file_name or ""
+        ext = os.path.splitext(file_name)[1].lower()
 
-    status_msg = await message.reply_text("⏳ <i>Sous-titre reçu, démarrage du hardsub...</i>")
-    await message.delete()
+        if pending["action"] == "merge":
+            audio_exts = (".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac", ".opus")
+            if ext not in audio_exts:
+                await message.reply_text("❌ Envoie un fichier audio valide.", quote=True)
+                return
+            _pending_media_input.pop(reply_id, None)
+            os.makedirs(Paths.WORK_PATH, exist_ok=True)
+            local_path = os.path.join(Paths.WORK_PATH, f"companion_{uuid4().hex[:8]}{ext}")
+            await message.download(file_name=local_path)
+            status = await message.reply_text("⏳ <i>Fusion en cours...</i>")
+            await message.delete()
+            try:
+                out = await media_tools.merge_audio_video(pending["video_path"], local_path, status)
+                from colab_leecher.uploader.telegram import upload_file
+                await upload_file(out, os.path.basename(out), is_last=True)
+                await status.delete()
+            except Exception as e:
+                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
+            return
 
-    os.makedirs(Paths.WORK_PATH, exist_ok=True)
-    subtitle_path = os.path.join(Paths.WORK_PATH, f"manual_sub_{uuid4().hex[:8]}{ext}")
-    await message.download(file_name=subtitle_path)
+        if pending["action"] == "hardsub":
+            if ext not in (".ass", ".srt", ".ssa"):
+                await message.reply_text("❌ Envoie un fichier <code>.ass</code> ou <code>.srt</code> valide.", quote=True)
+                return
+            _pending_media_input.pop(reply_id, None)
+            os.makedirs(Paths.WORK_PATH, exist_ok=True)
+            local_path = os.path.join(Paths.WORK_PATH, f"companion_{uuid4().hex[:8]}{ext}")
+            await message.download(file_name=local_path)
+            status = await message.reply_text("⏳ <i>Hardsub en cours...</i>")
+            await message.delete()
+            try:
+                out = await media_tools.hardsub_local(pending["video_path"], local_path, status)
+                from colab_leecher.uploader.telegram import upload_file
+                await upload_file(out, os.path.basename(out), is_last=True)
+                await status.delete()
+            except Exception as e:
+                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
+            return
 
-    # Fire-and-forget : ne bloque pas ce handler, donc le bot reste réactif
-    # pour recevoir d'autres liens/sous-titres pendant que celui-ci tourne.
-    get_event_loop().create_task(
-        Direct_FC_Hardsub_Handler(pending["url"], pending["name"], subtitle_path, status_msg)
-    )
+    # ── Cas 3 : rien en attente → comportement d'origine (on ignore) ──
+    return
 
 
 # ══════════════════════════════════════════════
