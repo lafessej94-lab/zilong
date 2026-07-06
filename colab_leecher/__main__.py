@@ -65,22 +65,55 @@ _pending_media: dict[int, dict] = {}
 _pending_media_input: dict[int, dict] = {}
 
 
+# ══════════════════════════════════════════════
+#  NEW — Callback de progression pour les téléchargements Pyrogram
+# ══════════════════════════════════════════════
+
+async def _make_dl_progress_cb(status_msg, label: str):
+    """Callback de progression pour client.download_media / message.download.
+    Édite status_msg toutes les 3s avec %, vitesse, ETA — throttlé pour
+    éviter le flood-wait Telegram. Toujours édité une dernière fois à 100%."""
+    state = {"last": 0.0, "start": datetime.now().timestamp()}
+
+    async def cb(current: int, total: int):
+        now = datetime.now().timestamp()
+        if now - state["last"] < 3 and current != total:
+            return
+        state["last"] = now
+        pct = (current / total * 100) if total else 0.0
+        elapsed = max(now - state["start"], 0.01)
+        speed = current / elapsed
+        eta_s = int((total - current) / speed) if speed > 0 else 0
+        bar = _pct_bar(pct, 12)
+        try:
+            await status_msg.edit_text(
+                f"⏳ <b>{label}</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"<code>[{bar}]</code>  <b>{pct:.1f}%</b>\n\n"
+                f"📦 <b>Done</b>   <code>{sizeUnit(current)}</code>\n"
+                f"📦 <b>Total</b>  <code>{sizeUnit(total)}</code>\n"
+                f"🚀 <b>Speed</b>  <code>{sizeUnit(speed)}/s</code>\n"
+                f"⏳ <b>ETA</b>    <code>{getTime(eta_s)}</code>"
+            )
+        except Exception:
+            pass
+
+    return cb
+
+
 async def _ensure_local_video(msg_id: int, client, status_msg) -> str:
     """Télécharge la vidéo en attente (si pas déjà fait) et met en cache le
-    chemin local dans _pending_media pour les appels suivants sur le même msg_id."""
+    chemin local dans _pending_media pour les appels suivants sur le même msg_id.
+    Affiche une vraie progression (%, vitesse, ETA) pendant le téléchargement."""
     session = _pending_media.get(msg_id)
     if not session:
         raise RuntimeError("Session expirée — renvoie le fichier.")
     if "video_path" in session:
         return session["video_path"]
-    try:
-        await status_msg.edit_text("⏳ <i>Téléchargement de la vidéo...</i>")
-    except Exception:
-        pass
     os.makedirs(Paths.WORK_PATH, exist_ok=True)
     local_path = await client.download_media(
         session["video_file_id"],
         file_name=os.path.join(Paths.WORK_PATH, f"in_{uuid4().hex[:8]}_{session['video_file_name']}"),
+        progress=await _make_dl_progress_cb(status_msg, "TÉLÉCHARGEMENT VIDÉO"),
     )
     session["video_path"] = local_path
     return local_path
@@ -93,14 +126,11 @@ async def _ensure_local_audio(msg_id: int, client, status_msg) -> str:
         raise RuntimeError("Session expirée — renvoie le fichier.")
     if "audio_path" in session:
         return session["audio_path"]
-    try:
-        await status_msg.edit_text("⏳ <i>Téléchargement de l'audio...</i>")
-    except Exception:
-        pass
     os.makedirs(Paths.WORK_PATH, exist_ok=True)
     local_path = await client.download_media(
         session["audio_file_id"],
         file_name=os.path.join(Paths.WORK_PATH, f"in_{uuid4().hex[:8]}_{session['audio_file_name']}"),
+        progress=await _make_dl_progress_cb(status_msg, "TÉLÉCHARGEMENT AUDIO"),
     )
     session["audio_path"] = local_path
     return local_path
@@ -714,6 +744,37 @@ async def handle_incoming_video(client, message):
 async def handle_incoming_audio(client, message):
     if not _owner(message):
         return
+
+    # ── Si c'est un reply à un prompt "Merge" en attente, traiter cet audio
+    # comme fichier compagnon au lieu d'ouvrir un nouveau menu. Nécessaire
+    # car Telegram envoie souvent les fichiers audio comme type "audio" et
+    # non "document", donc l'ancien handler (document-only) les ratait.
+    reply_id = message.reply_to_message_id
+    if reply_id in _pending_media_input:
+        pending = _pending_media_input.get(reply_id)
+        if pending["action"] == "merge":
+            file_name = message.audio.file_name or "audio.mp3"
+            ext = os.path.splitext(file_name)[1].lower() or ".mp3"
+            _pending_media_input.pop(reply_id, None)
+            os.makedirs(Paths.WORK_PATH, exist_ok=True)
+            local_path = os.path.join(Paths.WORK_PATH, f"companion_{uuid4().hex[:8]}{ext}")
+            status = await message.reply_text("⏳ <i>Starting...</i>")
+            await message.download(
+                file_name=local_path,
+                progress=await _make_dl_progress_cb(status, "TÉLÉCHARGEMENT AUDIO"),
+            )
+            await message.delete()
+            try:
+                video_path = await _ensure_local_video(pending["video_msg_id"], client, status)
+                out = await media_tools.merge_audio_video(video_path, local_path, status)
+                from colab_leecher.uploader.telegram import upload_file
+                await upload_file(out, os.path.basename(out), is_last=True)
+                await status.delete()
+            except Exception as e:
+                await status.edit_text(f"❌ <b>Erreur</b>\n<code>{e}</code>")
+            return
+        # "hardsub" n'attend jamais un audio — on tombe dans le comportement normal.
+
     if BOT.State.task_going:
         msg = await message.reply_text("⚠️ Task running — /cancel first.", quote=True)
         await sleep(8); await msg.delete()
@@ -1213,7 +1274,8 @@ async def callbacks(client, cq):
 
         # ── Merge Audio+Video : demande le fichier audio compagnon ──
         # Le téléchargement de la vidéo n'a lieu que quand le fichier audio
-        # compagnon arrive (voir handle_subtitle_document) — pas ici.
+        # compagnon arrive (voir handle_subtitle_document / handle_incoming_audio)
+        # — pas ici.
         if action == "mt_merge":
             msg_id = int(parts[1])
             session = _pending_media.get(msg_id)
@@ -1506,8 +1568,11 @@ async def handle_subtitle_document(client, message):
             _pending_media_input.pop(reply_id, None)
             os.makedirs(Paths.WORK_PATH, exist_ok=True)
             local_path = os.path.join(Paths.WORK_PATH, f"companion_{uuid4().hex[:8]}{ext}")
-            await message.download(file_name=local_path)
             status = await message.reply_text("⏳ <i>Starting...</i>")
+            await message.download(
+                file_name=local_path,
+                progress=await _make_dl_progress_cb(status, "TÉLÉCHARGEMENT AUDIO"),
+            )
             await message.delete()
             try:
                 video_path = await _ensure_local_video(pending["video_msg_id"], client, status)
@@ -1526,8 +1591,11 @@ async def handle_subtitle_document(client, message):
             _pending_media_input.pop(reply_id, None)
             os.makedirs(Paths.WORK_PATH, exist_ok=True)
             local_path = os.path.join(Paths.WORK_PATH, f"companion_{uuid4().hex[:8]}{ext}")
-            await message.download(file_name=local_path)
             status = await message.reply_text("⏳ <i>Starting...</i>")
+            await message.download(
+                file_name=local_path,
+                progress=await _make_dl_progress_cb(status, "TÉLÉCHARGEMENT SOUS-TITRE"),
+            )
             await message.delete()
             try:
                 video_path = await _ensure_local_video(pending["video_msg_id"], client, status)
