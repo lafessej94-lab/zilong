@@ -25,6 +25,8 @@ from colab_leecher.freeconvert import (
     hardsub_remote_url as fc_hardsub_remote_url,
     quality_label as fc_quality_label,
 )
+from colab_leecher.local_hardsub import hardsub_local
+from colab_leecher.downlader.aria2 import aria2_Download
 from colab_leecher.seedr import SeedrError, _del_folder, fetch_urls_via_seedr
 from colab_leecher.uploader.telegram import upload_file
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -38,7 +40,17 @@ from colab_leecher.utility.helper import (
 )
 
 
-async def Leech(folder_path: str, remove: bool, convert_videos: bool = True):
+async def Leech(folder_path: str, remove: bool, convert_videos: bool = True, status_msg=None):
+    """
+    status_msg optionnel : si fourni (cas des jobs FreeConvert concurrents),
+    on édite UNIQUEMENT ce message local, sans jamais toucher au MSG.status_msg
+    global — évite que 2 jobs FC en parallèle ne se marchent dessus sur le
+    message de statut. Si absent, comportement historique inchangé (pipeline
+    leech normal, single-task, utilise le global MSG.status_msg).
+    """
+    is_global = status_msg is None
+    target_msg = status_msg or MSG.status_msg
+
     files = [str(p) for p in pathlib.Path(folder_path).glob("**/*") if p.is_file()]
     if not files:
         raise RuntimeError(f"No files were produced in {folder_path}.")
@@ -87,13 +99,16 @@ async def Leech(folder_path: str, remove: bool, convert_videos: bool = True):
                 f"<code>{file_name}</code>\n"
             )
             try:
-                MSG.status_msg = await MSG.status_msg.edit_text(
+                edited = await target_msg.edit_text(
                     text=Messages.task_msg + Messages.status_head
                     + "\n⏳ <i>Starting...</i>" + sysINFO(),
                     reply_markup=keyboard(),
                 )
+                target_msg = edited
+                if is_global:
+                    MSG.status_msg = edited
             except Exception: pass
-            await upload_file(new_path, file_name, is_last=is_last)
+            await upload_file(new_path, file_name, is_last=is_last, status_msg=target_msg)
             Transfer.up_bytes.append(os.stat(new_path).st_size)
             if is_last and not split_cleaned:
                 if ospath.exists(Paths.temp_zpath): shutil.rmtree(Paths.temp_zpath)
@@ -107,14 +122,17 @@ async def Leech(folder_path: str, remove: bool, convert_videos: bool = True):
             BotTimes.current_time = time()
             Messages.status_head  = f"📤 <b>UPLOADING</b>\n\n<code>{file_name}</code>\n"
             try:
-                MSG.status_msg = await MSG.status_msg.edit_text(
+                edited = await target_msg.edit_text(
                     text=Messages.task_msg + Messages.status_head
                     + "\n⏳ <i>Starting...</i>" + sysINFO(),
                     reply_markup=keyboard(),
                 )
+                target_msg = edited
+                if is_global:
+                    MSG.status_msg = edited
             except Exception: pass
             file_size = os.stat(new_path).st_size
-            await upload_file(new_path, file_name, is_last=is_last)
+            await upload_file(new_path, file_name, is_last=is_last, status_msg=target_msg)
             Transfer.up_bytes.append(file_size)
             if remove and ospath.exists(new_path): os.remove(new_path)
             elif not remove:
@@ -122,8 +140,9 @@ async def Leech(folder_path: str, remove: bool, convert_videos: bool = True):
                     os.remove(ospath.join(Paths.temp_files_dir, fi))
 
     if remove and ospath.exists(folder_path): shutil.rmtree(folder_path)
-    for d in (Paths.thumbnail_ytdl, Paths.temp_files_dir):
-        if ospath.exists(d): shutil.rmtree(d)
+    if is_global:
+        for d in (Paths.thumbnail_ytdl, Paths.temp_files_dir):
+            if ospath.exists(d): shutil.rmtree(d)
 
 
 async def CloudConvert_Handler(folder_path: str, remove: bool):
@@ -650,7 +669,7 @@ async def Seedr_FC_Hardsub_Handler(magnet: str, status_msg) -> None:
                 )
 
             await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Upload", 100.0, "Uploading to Telegram")
-            await Leech(job_dir, True, convert_videos=False)
+            await Leech(job_dir, True, convert_videos=False, status_msg=status_msg)
             try:
                 await status_msg.delete()
             except Exception:
@@ -715,7 +734,7 @@ async def Direct_FC_Hardsub_Handler(video_url: str, name: str, subtitle_path: st
             )
 
             await _fc_job_status(status_msg, "FreeConvert Hardsub", "Upload", 100.0, "Uploading to Telegram", name)
-            await Leech(job_dir, True, convert_videos=False)
+            await Leech(job_dir, True, convert_videos=False, status_msg=status_msg)
             try:
                 await status_msg.delete()
             except Exception:
