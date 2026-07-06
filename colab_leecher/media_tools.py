@@ -1,12 +1,13 @@
 """
-colab_leecher/media_tools.py
+colab_leecher/media_tools.py — PATCHED
 ─────────────────────────────
 Outils FFmpeg déclenchés quand l'utilisateur envoie directement un fichier
 vidéo ou audio au bot (par opposition à un lien à télécharger).
 
 Toutes les fonctions sont bloquantes-async : elles lancent ffmpeg dans un
 sous-process et mettent à jour un message de statut Telegram pendant
-l'exécution, façon `converters.py` / `handler.py`.
+l'exécution, avec une vraie progression (%, vitesse, ETA) basée sur la
+sortie -progress de ffmpeg.
 """
 
 import os
@@ -18,41 +19,13 @@ from datetime import datetime
 from os import path as ospath, makedirs
 
 from colab_leecher.utility.variables import Paths, ProcessTracker
-from colab_leecher.utility.helper import sizeUnit, getTime
+from colab_leecher.utility.helper import sizeUnit, getTime, _pct_bar
 
 
 def _job_dir(job_id: str) -> str:
     d = ospath.join(Paths.WORK_PATH, f"mediatools_{job_id}")
     makedirs(d, exist_ok=True)
     return d
-
-
-async def _run_ffmpeg(cmd: list[str], label: str, status_msg, title: str, extra: str = ""):
-    """Lance ffmpeg, garde le PID trackable via /status, edite status_msg toutes les 3s."""
-    start = datetime.now()
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    ProcessTracker.register(proc.pid, label)
-    tick = 0
-    try:
-        while proc.poll() is None:
-            spent = getTime((datetime.now() - start).seconds)
-            bar = "░" * (tick % 12) + "█" + "░" * (11 - (tick % 12))
-            try:
-                await status_msg.edit_text(
-                    f"⚙️ <b>{title}</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"<code>[{bar}]</code>\n\n"
-                    f"⏱ <b>Spent</b>  <code>{spent}</code>\n"
-                    f"{extra}"
-                )
-            except Exception:
-                pass
-            tick += 1
-            await sleep(3)
-    finally:
-        ProcessTracker.unregister(proc.pid)
-
-    if proc.returncode != 0:
-        raise RuntimeError(f"{label} a échoué (code {proc.returncode})")
 
 
 def probe_streams(path: str) -> dict:
@@ -66,6 +39,107 @@ def probe_streams(path: str) -> dict:
     return json.loads(result.stdout)
 
 
+def _probe_duration(path: str) -> float:
+    """Durée en secondes du média (0.0 si inconnue)."""
+    try:
+        info = probe_streams(path)
+        return float((info.get("format") or {}).get("duration") or 0.0)
+    except Exception:
+        return 0.0
+
+
+async def _run_ffmpeg(cmd: list[str], label: str, status_msg, title: str,
+                       extra: str = "", total_duration: float = 0.0):
+    """
+    Lance ffmpeg avec -progress pipe:1, parse la sortie en temps réel pour
+    calculer % / vitesse / ETA, et édite status_msg toutes les 3s.
+    """
+    # Insère -progress pipe:1 -nostats juste après le binaire ffmpeg
+    patched_cmd = [cmd[0], "-progress", "pipe:1", "-nostats"] + cmd[1:]
+
+    start = datetime.now()
+    proc = subprocess.Popen(
+        patched_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, bufsize=1, universal_newlines=True,
+    )
+    ProcessTracker.register(proc.pid, label)
+
+    pct = 0.0
+    speed_x = "—"
+    out_time_s = 0.0
+    last_edit = 0.0
+    done = False
+
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            val = val.strip()
+
+            if key == "out_time_ms":
+                try:
+                    out_time_s = max(0, int(val)) / 1_000_000
+                except ValueError:
+                    pass
+            elif key == "out_time":
+                # format HH:MM:SS.microseconds — fallback si out_time_ms absent
+                try:
+                    h, m, s = val.split(":")
+                    out_time_s = int(h) * 3600 + int(m) * 60 + float(s)
+                except Exception:
+                    pass
+            elif key == "speed":
+                speed_x = val if val not in ("", "0x") else "—"
+            elif key == "progress" and val == "end":
+                done = True
+
+            if total_duration > 0:
+                pct = min(100.0, (out_time_s / total_duration) * 100)
+
+            now_ts = datetime.now().timestamp()
+            if now_ts - last_edit >= 3 or done:
+                last_edit = now_ts
+                elapsed_s = (datetime.now() - start).total_seconds()
+                spent = getTime(int(elapsed_s))
+
+                if total_duration > 0:
+                    bar = _pct_bar(pct, 12)
+                    eta = "—"
+                    if pct > 0.5:
+                        remaining_s = elapsed_s * (100 - pct) / pct
+                        eta = getTime(int(remaining_s))
+                    body = (
+                        f"<code>[{bar}]</code>  <b>{pct:.1f}%</b>\n\n"
+                        f"🎯 <b>Position</b>  <code>{getTime(int(out_time_s))} / {getTime(int(total_duration))}</code>\n"
+                        f"🚀 <b>Speed</b>     <code>{speed_x}</code>\n"
+                        f"⏳ <b>ETA</b>       <code>{eta}</code>\n"
+                        f"⏱ <b>Spent</b>     <code>{spent}</code>"
+                    )
+                else:
+                    # Pas de durée connue (ex: screenshot) → mode simple
+                    body = (
+                        f"🚀 <b>Speed</b>  <code>{speed_x}</code>\n"
+                        f"⏱ <b>Spent</b>  <code>{spent}</code>"
+                    )
+
+                try:
+                    await status_msg.edit_text(
+                        f"⚙️ <b>{title}</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"{body}\n"
+                        f"{extra}"
+                    )
+                except Exception:
+                    pass
+    finally:
+        proc.wait()
+        ProcessTracker.unregister(proc.pid)
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"{label} a échoué (code {proc.returncode})")
+
+
 # ══════════════════════════════════════════════
 #  1) Remove Audio
 # ══════════════════════════════════════════════
@@ -74,8 +148,10 @@ async def remove_audio(video_path: str, status_msg) -> str:
     job = _job_dir("noaudio")
     out = ospath.join(job, f"noaudio_{ospath.basename(video_path)}")
     cmd = ["ffmpeg", "-y", "-i", video_path, "-c", "copy", "-an", out]
+    duration = _probe_duration(video_path)
     await _run_ffmpeg(cmd, "ffmpeg-removeaudio", status_msg, "REMOVE AUDIO",
-                       f"📄 <code>{ospath.basename(video_path)}</code>")
+                       f"📄 <code>{ospath.basename(video_path)}</code>",
+                       total_duration=duration)
     return out
 
 
@@ -86,11 +162,11 @@ async def remove_audio(video_path: str, status_msg) -> str:
 async def take_screenshot(video_path: str, status_msg, timestamp: float | None = None) -> str:
     job = _job_dir("shot")
     if timestamp is None:
-        info = probe_streams(video_path)
-        duration = float((info.get("format") or {}).get("duration") or 10.0)
+        duration = _probe_duration(video_path) or 10.0
         timestamp = duration / 2
     out = ospath.join(job, f"shot_{ospath.splitext(ospath.basename(video_path))[0]}.jpg")
     cmd = ["ffmpeg", "-y", "-ss", str(timestamp), "-i", video_path, "-frames:v", "1", "-q:v", "2", out]
+    # Pas de total_duration ici : c'est quasi-instantané, pas la peine.
     await _run_ffmpeg(cmd, "ffmpeg-screenshot", status_msg, "SCREENSHOT",
                        f"🕐 <code>{timestamp:.1f}s</code>")
     return out
@@ -104,14 +180,15 @@ async def merge_audio_video(video_path: str, audio_path: str, status_msg) -> str
     job = _job_dir("merge")
     name = ospath.splitext(ospath.basename(video_path))[0]
     out = ospath.join(job, f"{name}_merged.mkv")
-    # On garde la vidéo intacte et on remplace/ajoute la piste audio fournie.
     cmd = [
         "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
         "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "copy", "-c:a", "aac", "-shortest", out,
     ]
+    duration = _probe_duration(video_path)
     await _run_ffmpeg(cmd, "ffmpeg-merge", status_msg, "MERGE AUDIO + VIDEO",
-                       f"🎬 <code>{ospath.basename(video_path)}</code>\n🎵 <code>{ospath.basename(audio_path)}</code>")
+                       f"🎬 <code>{ospath.basename(video_path)}</code>\n🎵 <code>{ospath.basename(audio_path)}</code>",
+                       total_duration=duration)
     return out
 
 
@@ -124,8 +201,6 @@ async def hardsub_local(video_path: str, subtitle_path: str, status_msg) -> str:
     name = ospath.splitext(ospath.basename(video_path))[0]
     out = ospath.join(job, f"{name}_hardsub.mp4")
 
-    # Copie du sous-titre dans le dossier de travail pour éviter les soucis
-    # de chemins contenant des espaces/apostrophes avec le filtre ffmpeg.
     sub_ext = ospath.splitext(subtitle_path)[1].lower()
     local_sub = ospath.join(job, f"sub{sub_ext}")
     shutil.copy2(subtitle_path, local_sub)
@@ -140,13 +215,15 @@ async def hardsub_local(video_path: str, subtitle_path: str, status_msg) -> str:
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "copy", out,
     ]
+    duration = _probe_duration(video_path)
     await _run_ffmpeg(cmd, "ffmpeg-hardsub-local", status_msg, "HARDSUB LOCAL",
-                       f"📄 <code>{ospath.basename(video_path)}</code>\n💬 <code>{ospath.basename(subtitle_path)}</code>")
+                       f"📄 <code>{ospath.basename(video_path)}</code>\n💬 <code>{ospath.basename(subtitle_path)}</code>",
+                       total_duration=duration)
     return out
 
 
 # ══════════════════════════════════════════════
-#  5) Audio Converter (audio venu d'une vidéo, ou fichier audio direct)
+#  5) Audio Converter
 # ══════════════════════════════════════════════
 
 AUDIO_FORMATS = {
@@ -166,11 +243,13 @@ async def convert_audio(input_path: str, out_ext: str, status_msg, extract_from_
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     if extract_from_video:
-        cmd += ["-vn"]  # on jette la piste vidéo si la source est une vidéo
+        cmd += ["-vn"]
     cmd += AUDIO_FORMATS[out_ext] + [out]
 
+    duration = _probe_duration(input_path)
     await _run_ffmpeg(cmd, "ffmpeg-audioconv", status_msg, "AUDIO CONVERTER",
-                       f"📄 <code>{ospath.basename(input_path)}</code> → <code>{out_ext.upper()}</code>")
+                       f"📄 <code>{ospath.basename(input_path)}</code> → <code>{out_ext.upper()}</code>",
+                       total_duration=duration)
     return out
 
 
@@ -179,8 +258,6 @@ async def convert_audio(input_path: str, out_ext: str, status_msg, extract_from_
 # ══════════════════════════════════════════════
 
 def list_local_streams(path: str) -> list[dict]:
-    """Retourne une liste simplifiée des pistes du fichier local, avec l'index
-    ffmpeg (0:N) nécessaire pour l'extraction via -map."""
     info = probe_streams(path)
     out = []
     for s in info.get("streams", []):
@@ -209,10 +286,12 @@ async def extract_local_stream(path: str, stream_index: int, stream_type: str, s
     elif stream_type == "audio":
         out = ospath.join(job, f"{name}_audio.m4a")
         cmd = ["ffmpeg", "-y", "-i", path, "-map", f"0:{stream_index}", "-c", "copy", out]
-    else:  # subtitle
+    else:
         out = ospath.join(job, f"{name}_sub.srt")
         cmd = ["ffmpeg", "-y", "-i", path, "-map", f"0:{stream_index}", "-c:s", "srt", out]
 
+    duration = _probe_duration(path)
     await _run_ffmpeg(cmd, "ffmpeg-extract-local", status_msg, "STREAM EXTRACTOR",
-                       f"📄 <code>{ospath.basename(path)}</code>  ·  piste {stream_index}")
+                       f"📄 <code>{ospath.basename(path)}</code>  ·  piste {stream_index}",
+                       total_duration=duration)
     return out
