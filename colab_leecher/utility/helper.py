@@ -366,7 +366,14 @@ def sysINFO():
     )
 
 
-async def status_bar(down_msg, speed, percentage, eta, done, left, engine):
+async def status_bar(down_msg, speed, percentage, eta, done, left, engine, status_msg=None):
+    """
+    status_msg optionnel : si fourni, édite CE message précis plutôt que le
+    MSG.status_msg global — nécessaire pour que les jobs FreeConvert
+    concurrents affichent chacun leur propre progression sans se marcher
+    dessus. Si absent, comportement inchangé (pipeline normal single-task).
+    """
+    target_msg = status_msg or MSG.status_msg
     bar = _pct_bar(float(percentage), 12)
     s_ico = _speed_emoji(str(speed))
     pct_f = float(percentage)
@@ -385,7 +392,7 @@ async def status_bar(down_msg, speed, percentage, eta, done, left, engine):
     )
     try:
         if isTimeOver():
-            await MSG.status_msg.edit_text(
+            await target_msg.edit_text(
                 text=Messages.task_msg + down_msg + text + sysINFO(),
                 disable_web_page_preview=True,
                 reply_markup=keyboard(),
