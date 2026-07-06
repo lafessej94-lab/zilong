@@ -528,7 +528,7 @@ async def unzip_pswd(client, message):
     await sleep(15); await message_deleter(message, msg)
 
 
-@colab_bot.on_message(filters.reply & filters.private)
+@colab_bot.on_message(filters.reply & filters.private & filters.text)
 async def setFix(client, message):
     if BOT.State.prefix:
         BOT.Setting.prefix = message.text; BOT.State.prefix = False
