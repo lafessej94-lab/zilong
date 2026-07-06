@@ -29,15 +29,19 @@ async def progress_bar(current, total):
     )
 
 
-async def upload_file(file_path, real_name, is_last: bool = False):
+async def upload_file(file_path, real_name, is_last: bool = False, status_msg=None):
     """
     Upload one file directly to the owner's private chat.
 
-    is_last  — when True the caption shows ✅ Done and the
-               progress status message is deleted afterwards.
+    is_last     — when True the caption shows ✅ Done and the
+                  progress status message is deleted afterwards.
+    status_msg  — optional dedicated status message to edit/delete
+                  (used for parallel FreeConvert jobs). Falls back
+                  to the global MSG.status_msg if not provided.
     """
     global Transfer, MSG
     BotTimes.task_start = datetime.now()
+    target_msg = status_msg or MSG.status_msg
 
     # Caption: clean name, or "✅ Done · name" on the final file
     name_part = f"{BOT.Setting.prefix} {real_name} {BOT.Setting.suffix}".strip()
@@ -109,14 +113,14 @@ async def upload_file(file_path, real_name, is_last: bool = False):
         # Delete the progress status message once the last file lands
         if is_last:
             try:
-                await MSG.status_msg.delete()
+                await target_msg.delete()
             except Exception:
                 pass
 
     except FloodWait as e:
         logging.warning(f"FloodWait {e.value}s")
         await sleep(e.value)
-        await upload_file(file_path, real_name, is_last)
+        await upload_file(file_path, real_name, is_last, status_msg)
 
     except Exception as e:
         logging.exception(f"Upload error: {e}")
