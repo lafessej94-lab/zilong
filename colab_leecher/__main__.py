@@ -275,7 +275,7 @@ def _ring(p):  return "🟢" if p < 40 else ("🟡" if p < 70 else "🔴")
 async def start(client, message):
     await message.delete()
     await message.reply_text(
-        "⚡ <b>ZILONG BOT</b>\n"
+        "⚡ <b>SAE BOT</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🟢 Online &amp; Ready\n\n"
         "Send a <b>link</b>, <b>magnet</b> or <b>path</b>.\n\n"
@@ -380,7 +380,7 @@ def _status_panel() -> str:
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "⚡  <b>ZILONG BOT — STATUS</b>",
+        "⚡  <b>SAE BOT — STATUS</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
@@ -814,7 +814,7 @@ async def callbacks(client, cq):
     if data == "cb_back_start":
         await cq.answer()
         await cq.message.edit_text(
-            "⚡ <b>ZILONG BOT</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n🟢 Online",
+            "⚡ <b>SAE BOT</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n🟢 Online",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("📖 Help",     callback_data="cb_help"),
                 InlineKeyboardButton("⚙️ Settings", callback_data="cb_settings"),
@@ -1553,6 +1553,6 @@ except Exception as e:
     logging.warning(f"Nyaa tracker not loaded: {e}")
 
 
-logging.info("⚡ Zilong started.")
+logging.info("⚡ Sae started.")
 get_event_loop().create_task(_startup_welcome())
 colab_bot.run()
