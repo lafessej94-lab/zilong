@@ -201,16 +201,14 @@ def _parse_aria2_pct(line: str) -> Optional[float]:
 
 async def _download_file(url: str, dest_path: str, progress_cb: ProgressCB = None) -> str:
     """
-    Télécharge le résultat FreeConvert via aria2c en multi-connexion (bien plus
-    rapide qu'un simple stream aiohttp mono-connexion). Retombe sur aiohttp si
-    aria2c n'est pas installé ou échoue.
+    Télécharge le résultat FreeConvert via aiohttp mono-connexion 
     """
     dest_dir = os.path.dirname(dest_path) or "."
     dest_name = os.path.basename(dest_path)
     os.makedirs(dest_dir, exist_ok=True)
 
     cmd = [
-        "aria2c",
+        "aiohttp mono-connexion",
         "-x16", "-s16", "-k1M",
         "--seed-time=0",
         "--summary-interval=1",
@@ -310,17 +308,11 @@ async def hardsub_remote_url(
     style: AssStyle = DEFAULT_HARDSUB_STYLE,
     process_cb: ProgressCB = None,
     download_cb: ProgressCB = None,
-    url_cb: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> str:
     """
     Brûle des sous-titres dans une vidéo via FreeConvert, en forçant le style
     ASS (police/contour/ombre) avant envoi puisque FreeConvert applique
     tel quel le style écrit dans le fichier sous-titre reçu.
-
-    url_cb : optionnel — appelé avec le lien de téléchargement direct dès
-    que FreeConvert a fini son job, AVANT qu'on commence à télécharger le
-    résultat. Sert de filet de sécurité : si le download/upload plante
-    ensuite, l'utilisateur a déjà le lien pour récupérer le fichier lui-même.
     """
     keys = parse_api_keys(api_keys)
     api_key = await pick_working_key(keys)
@@ -350,12 +342,5 @@ async def hardsub_remote_url(
     job = await _wait_for_job(api_key, job_id, process_cb)
     url = _export_url(job)
     if not url:
-        raise RuntimeError("FreeConvert a terminé sans URL d'export.")
-
-    if url_cb:
-        try:
-            await url_cb(url)
-        except Exception as exc:
-            log.warning("url_cb a échoué (non bloquant): %s", exc)
-
+        raise RuntimeError("FreeConvert a terminé avec URL d'export.")
     return await _download_file(url, output_path, download_cb)
