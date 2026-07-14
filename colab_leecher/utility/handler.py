@@ -656,6 +656,23 @@ async def Seedr_FC_Hardsub_Handler(magnet: str, status_msg) -> None:
                     await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Download", overall, detail, filename)
 
                 await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Queue", base_start + 10.0, "Submitting FreeConvert hardsub job", name)
+
+                async def _url_cb(url: str, filename: str = name) -> None:
+                    try:
+                        await colab_bot.send_message(
+                            chat_id=OWNER,
+                            text=(
+                                "🔗 <b>Lien direct disponible</b>\n\n"
+                                f"<code>{filename}</code>\n\n"
+                                f"{url}\n\n"
+                                "<i>Le bot va maintenant le télécharger et l'uploader. "
+                                "Si ça plante, tu as déjà ce lien pour le récupérer toi-même.</i>"
+                            ),
+                            disable_web_page_preview=True,
+                        )
+                    except Exception:
+                        pass
+
                 await fc_hardsub_remote_url(
                     FC_API_KEY,
                     video_url,
@@ -665,6 +682,7 @@ async def Seedr_FC_Hardsub_Handler(magnet: str, status_msg) -> None:
                     quality_profile=BOT.Options.cc_quality_profile,
                     process_cb=_process_cb,
                     download_cb=_download_cb,
+                    url_cb=_url_cb,
                 )
 
             await _fc_job_status(status_msg, "Seedr + FreeConvert Hardsub", "Upload", 100.0, "Uploading to Telegram")
@@ -721,6 +739,23 @@ async def Direct_FC_Hardsub_Handler(video_url: str, name: str, subtitle_path: st
                 await _fc_job_status(status_msg, "FreeConvert Hardsub", "Download", overall, detail, name)
 
             await _fc_job_status(status_msg, "FreeConvert Hardsub", "Queue", 5.0, "Submitting FreeConvert hardsub job", name)
+
+            async def _url_cb(url: str) -> None:
+                try:
+                    await colab_bot.send_message(
+                        chat_id=OWNER,
+                        text=(
+                            "🔗 <b>Lien direct disponible</b>\n\n"
+                            f"<code>{name}</code>\n\n"
+                            f"{url}\n\n"
+                            "<i>Le bot va maintenant le télécharger et l'uploader. "
+                            "Si ça plante, tu as déjà ce lien pour le récupérer toi-même.</i>"
+                        ),
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+
             await fc_hardsub_remote_url(
                 FC_API_KEY,
                 video_url,
@@ -730,6 +765,7 @@ async def Direct_FC_Hardsub_Handler(video_url: str, name: str, subtitle_path: st
                 quality_profile=BOT.Options.cc_quality_profile,
                 process_cb=_process_cb,
                 download_cb=_download_cb,
+                url_cb=_url_cb,
             )
 
             await _fc_job_status(status_msg, "FreeConvert Hardsub", "Upload", 100.0, "Uploading to Telegram", name)
