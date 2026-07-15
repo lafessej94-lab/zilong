@@ -201,18 +201,26 @@ def _parse_aria2_pct(line: str) -> Optional[float]:
 
 async def _download_file(url: str, dest_path: str, progress_cb: ProgressCB = None) -> str:
     """
-    Télécharge le résultat FreeConvert via aiohttp mono-connexion 
+    Télécharge le résultat FreeConvert.
+
+    IMPORTANT : contrairement à un download classique, le lien d'export
+    FreeConvert semble être à usage unique / ne pas supporter les requêtes
+    multi-plages (multi-connexion) — ouvrir plusieurs connexions vers cette
+    URL fait planter le download (voire invalide le lien). On force donc
+    UNE SEULE connexion (-x1 -s1), avec un timeout de sécurité pour ne
+    jamais rester bloqué indéfiniment si le lien pose problème.
     """
     dest_dir = os.path.dirname(dest_path) or "."
     dest_name = os.path.basename(dest_path)
     os.makedirs(dest_dir, exist_ok=True)
 
     cmd = [
-        "aiohttp mono-connexion",
-        "-x16", "-s16", "-k1M",
+        "aria2c",
+        "-x1", "-s1",
         "--seed-time=0",
         "--summary-interval=1",
         "--max-tries=3",
+        "--retry-wait=2",
         "--console-log-level=notice",
         "-d", dest_dir,
         "-o", dest_name,
@@ -230,19 +238,32 @@ async def _download_file(url: str, dest_path: str, progress_cb: ProgressCB = Non
         return await _download_file_aiohttp(url, dest_path, progress_cb)
 
     if progress_cb:
-        await progress_cb(0.0, "Téléchargement (aria2c multi-connexion)")
+        await progress_cb(0.0, "Téléchargement (aria2c mono-connexion)")
 
     assert proc.stdout is not None
-    while True:
-        line_bytes = await proc.stdout.readline()
-        if not line_bytes:
-            break
-        line = line_bytes.decode("utf-8", errors="replace")
-        pct = _parse_aria2_pct(line)
-        if pct is not None and progress_cb:
-            await progress_cb(pct, "Téléchargement (aria2c multi-connexion)")
 
-    code = await proc.wait()
+    async def _read_output():
+        while True:
+            line_bytes = await proc.stdout.readline()
+            if not line_bytes:
+                break
+            line = line_bytes.decode("utf-8", errors="replace")
+            pct = _parse_aria2_pct(line)
+            if pct is not None and progress_cb:
+                await progress_cb(pct, "Téléchargement (aria2c mono-connexion)")
+
+    try:
+        await asyncio.wait_for(_read_output(), timeout=1800)
+        code = await asyncio.wait_for(proc.wait(), timeout=30)
+    except asyncio.TimeoutError:
+        log.warning("aria2c bloqué trop longtemps, on force l'arrêt et fallback sur aiohttp.")
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        return await _download_file_aiohttp(url, dest_path, progress_cb)
+
     if code != 0 or not os.path.exists(dest_path):
         log.warning("aria2c a échoué (code %s), fallback sur aiohttp.", code)
         return await _download_file_aiohttp(url, dest_path, progress_cb)
@@ -308,11 +329,17 @@ async def hardsub_remote_url(
     style: AssStyle = DEFAULT_HARDSUB_STYLE,
     process_cb: ProgressCB = None,
     download_cb: ProgressCB = None,
+    url_cb: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> str:
     """
     Brûle des sous-titres dans une vidéo via FreeConvert, en forçant le style
     ASS (police/contour/ombre) avant envoi puisque FreeConvert applique
     tel quel le style écrit dans le fichier sous-titre reçu.
+
+    url_cb : optionnel — appelé avec le lien de téléchargement direct dès
+    que FreeConvert a fini son job, AVANT qu'on commence à télécharger le
+    résultat. Sert de filet de sécurité : si le download/upload plante
+    ensuite, l'utilisateur a déjà le lien pour récupérer le fichier lui-même.
     """
     keys = parse_api_keys(api_keys)
     api_key = await pick_working_key(keys)
@@ -342,5 +369,12 @@ async def hardsub_remote_url(
     job = await _wait_for_job(api_key, job_id, process_cb)
     url = _export_url(job)
     if not url:
-        raise RuntimeError("FreeConvert a terminé avec URL d'export.")
+        raise RuntimeError("FreeConvert a terminé sans URL d'export.")
+
+    if url_cb:
+        try:
+            await url_cb(url)
+        except Exception as exc:
+            log.warning("url_cb a échoué (non bloquant): %s", exc)
+
     return await _download_file(url, output_path, download_cb)
