@@ -71,6 +71,7 @@ colab_bot = Client(
     max_concurrent_transmissions=24,  # bande passante Colab confirmée abondante (581 Mbps mesurés) ->
                                        # le vrai plafond était le nb de connexions, pas le débit brut
     sleep_threshold=120,              # laisse pyrofork absorber les FloodWait courts sans planter
-    ipv6=True,                        # Colab/Google Cloud a souvent un meilleur routage en IPv6 vers Telegram
+    # ipv6=True retiré : Colab n'a pas de route IPv6 fonctionnelle vers Telegram
+    # (Errno 101 "Network is unreachable" en boucle) -> reste en IPv4 (défaut)
 )
 log.info("Pyrogram Client initialized")
