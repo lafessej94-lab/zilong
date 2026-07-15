@@ -68,7 +68,9 @@ colab_bot = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    max_concurrent_transmissions=6,  # défaut pyrofork = 1 (un seul flux) -> upload/download en série
-    sleep_threshold=120,             # laisse pyrofork absorber les FloodWait courts sans planter
+    max_concurrent_transmissions=24,  # bande passante Colab confirmée abondante (581 Mbps mesurés) ->
+                                       # le vrai plafond était le nb de connexions, pas le débit brut
+    sleep_threshold=120,              # laisse pyrofork absorber les FloodWait courts sans planter
+    ipv6=True,                        # Colab/Google Cloud a souvent un meilleur routage en IPv6 vers Telegram
 )
 log.info("Pyrogram Client initialized")
