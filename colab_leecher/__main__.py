@@ -528,7 +528,7 @@ async def unzip_pswd(client, message):
     await sleep(15); await message_deleter(message, msg)
 
 
-@colab_bot.on_message(filters.reply & filters.private & filters.text)
+@colab_bot.on_message(filters.reply & filters.private)
 async def setFix(client, message):
     if BOT.State.prefix:
         BOT.Setting.prefix = message.text; BOT.State.prefix = False
@@ -545,29 +545,36 @@ async def setFix(client, message):
 # ══════════════════════════════════════════════
 
 def _mode_keyboard():
-    rows = [
-        [InlineKeyboardButton("📄 Normal",      callback_data="normal"),
-         InlineKeyboardButton("🗜 Compress",    callback_data="zip")],
-        [InlineKeyboardButton("📂 Extract",     callback_data="unzip"),
-         InlineKeyboardButton("♻️ UnDoubleZip", callback_data="undzip")],
-        [InlineKeyboardButton("☁️ CC Convert",  callback_data="cc_convert"),
-         InlineKeyboardButton("📐 CC Resize",   callback_data="cc_resize")],
-        [InlineKeyboardButton("🧱 CC Compress", callback_data="cc_compress"),
-         InlineKeyboardButton("🎞 Streams",     callback_data="sx_open")],
-    ]
     first = (BOT.SOURCE or [""])[0].strip()
-    if first.startswith("magnet:?xt=urn:btih:"):
+    is_magnet = first.startswith("magnet:?xt=urn:btih:")
+    is_http = first.startswith("http://") or first.startswith("https://")
+
+    rows = [
+        [InlineKeyboardButton("── 📦 Fichier ──", callback_data="noop")],
+        [InlineKeyboardButton("📄 Normal",      callback_data="normal"),
+         InlineKeyboardButton("🗜 Compresser",  callback_data="zip")],
+        [InlineKeyboardButton("📂 Extraire",    callback_data="unzip"),
+         InlineKeyboardButton("♻️ Ré-archiver", callback_data="undzip")],
+        [InlineKeyboardButton("── ☁️ CloudConvert ──", callback_data="noop")],
+        [InlineKeyboardButton("🔄 Convertir",       callback_data="cc_convert"),
+         InlineKeyboardButton("📐 Redimensionner",  callback_data="cc_resize")],
+        [InlineKeyboardButton("🧱 Compresser", callback_data="cc_compress")],
+    ]
+
+    if is_magnet:
+        rows.append([InlineKeyboardButton("── 🧲 Seedr + Hardsub ──", callback_data="noop")])
+        rows.append([InlineKeyboardButton("☁️ Seedr+CC Convert", callback_data="seedr_cc_convert")])
         rows.append([
-            InlineKeyboardButton("☁️ Seedr+CC Convert", callback_data="seedr_cc_convert"),
-            InlineKeyboardButton("☁️ Seedr+CC Hardsub", callback_data="seedr_cc_hardsub"),
+            InlineKeyboardButton("☁️ CC Hardsub", callback_data="seedr_cc_hardsub"),
+            InlineKeyboardButton("🆓 FC Hardsub", callback_data="seedr_fc_hardsub"),
         ])
-        rows.append([
-            InlineKeyboardButton("🆓 Seedr+FC Hardsub", callback_data="seedr_fc_hardsub"),
-        ])
-    elif first.startswith("http://") or first.startswith("https://"):
-        rows.append([
-            InlineKeyboardButton("🆓 FC Hardsub", callback_data="fc_hardsub_manual"),
-        ])
+    elif is_http:
+        rows.append([InlineKeyboardButton("── 🧲 Hardsub ──", callback_data="noop")])
+        rows.append([InlineKeyboardButton("🆓 FC Hardsub", callback_data="fc_hardsub_manual")])
+
+    rows.append([InlineKeyboardButton("── 🎞 Autre ──", callback_data="noop")])
+    rows.append([InlineKeyboardButton("🎞 Extraire pistes (streams)", callback_data="sx_open")])
+
     return InlineKeyboardMarkup(rows)
 
 
@@ -597,11 +604,17 @@ async def handle_url(client, message):
     BOT.Mode.mode = "leech"
     BOT.State.started = True
 
-    n     = len([l for l in src if l.strip()])
-    label = "🏮 YTDL" if BOT.Mode.ytdl else "🔗 Link"
+    n = len([l for l in src if l.strip()])
+    first_src = (src or [""])[0].strip()
+    if BOT.Mode.ytdl:
+        kind_label = "🏮 Lien YTDL"
+    elif first_src.startswith("magnet:?xt=urn:btih:"):
+        kind_label = "🧲 Magnet détecté"
+    else:
+        kind_label = "🔗 Lien détecté"
 
     sent = await message.reply_text(
-        f"{label}  ·  <code>{n}</code> source(s)\n<b>Choose mode:</b>",
+        f"{kind_label}\n<code>{n}</code> source(s) · <b>Choisis un mode :</b>",
         reply_markup=_mode_keyboard(), quote=True,
     )
     _link_sessions[sent.id] = src
@@ -615,6 +628,11 @@ async def handle_url(client, message):
 async def callbacks(client, cq):
     data    = cq.data
     chat_id = cq.message.chat.id
+
+    # ── Labels de section non-cliquables (juste des repères visuels) ──
+    if data == "noop":
+        await cq.answer()
+        return
 
     # ── Help/Settings from /start ──────────────
     if data == "cb_help":
@@ -931,9 +949,9 @@ async def callbacks(client, cq):
     if data == "sx_back":
         clear_session(chat_id)
         n     = len([l for l in (BOT.SOURCE or []) if l.strip()])
-        label = "🏮 YTDL" if BOT.Mode.ytdl else "🔗 Link"
+        label = "🏮 Lien YTDL" if BOT.Mode.ytdl else "🔗 Lien détecté"
         await cq.message.edit_text(
-            f"{label}  ·  <code>{n}</code> source(s)\n<b>Choose mode:</b>",
+            f"{label}\n<code>{n}</code> source(s) · <b>Choisis un mode :</b>",
             reply_markup=_mode_keyboard()
         )
         return
