@@ -19,6 +19,16 @@ from colab_leecher.cloudconvert import cc_mode_label, quality_label, resize_labe
 from colab_leecher.utility.variables import BOT, MSG, BotTimes, Messages, Paths
 
 # ----------------------------
+# Fonction utilitaire locale sizeUnit
+# ----------------------------
+def sizeUnit(size):
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if size < 1024:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} PiB"
+
+# ----------------------------
 # INTERFACE SETTINGS (/settings)
 # ----------------------------
 async def send_settings(client, message, msg_id, command: bool):
@@ -95,7 +105,7 @@ async def status_bar(down_msg, speed, percentage, eta, done, left, engine, statu
     target_msg = status_msg or MSG.status_msg
     bar = "█" * int(percentage/10) + "░" * (10-int(percentage/10))
     pct_str = f"<b>{percentage:.1f}%</b>"
-    elapsed = getTime((datetime.now() - BotTimes.start_time).seconds)
+    elapsed = (datetime.now() - BotTimes.start_time).seconds
 
     text = (
         f"📥 <b>Téléchargement</b>\n"
@@ -103,7 +113,7 @@ async def status_bar(down_msg, speed, percentage, eta, done, left, engine, statu
         f"[{bar}] {pct_str}\n"
         f"⚡ Vitesse : {speed}\n"
         f"⏳ Temps restant : {eta}\n"
-        f"🕰 Écoulé : {elapsed}\n"
+        f"🕰 Écoulé : {elapsed}s\n"
         f"⚙️ Moteur : {engine}\n\n"
         f"✅ Fait : {done}\n"
         f"📦 Total : {left}\n\n"
@@ -127,7 +137,7 @@ async def upload_bar(file_name, speed, percentage, eta, done, left, engine, stat
     target_msg = status_msg or MSG.status_msg
     bar = "█" * int(percentage/10) + "░" * (10-int(percentage/10))
     pct_str = f"<b>{percentage:.1f}%</b>"
-    elapsed = getTime((datetime.now() - BotTimes.start_time).seconds)
+    elapsed = (datetime.now() - BotTimes.start_time).seconds
 
     text = (
         f"📤 <b>Upload</b>\n"
@@ -135,7 +145,7 @@ async def upload_bar(file_name, speed, percentage, eta, done, left, engine, stat
         f"[{bar}] {pct_str}\n"
         f"⚡ Vitesse : {speed}\n"
         f"⏳ Temps restant : {eta}\n"
-        f"🕰 Écoulé : {elapsed}\n"
+        f"🕰 Écoulé : {elapsed}s\n"
         f"⚙️ Moteur : {engine}\n\n"
         f"✅ Fait : {done}\n"
         f"📦 Total : {left}\n\n"
