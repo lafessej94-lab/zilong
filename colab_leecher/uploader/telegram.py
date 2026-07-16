@@ -11,7 +11,7 @@ from colab_leecher.utility.helper import (
 )
 
 
-async def progress_bar(current, total):
+async def progress_bar(current, total, status_msg=None):
     upload_speed = 4 * 1024 * 1024
     elapsed = (datetime.now() - BotTimes.task_start).seconds
     if current > 0 and elapsed > 0:
@@ -26,6 +26,7 @@ async def progress_bar(current, total):
         done=sizeUnit(current + sum(Transfer.up_bytes)),
         left=sizeUnit(Transfer.total_down_size),
         engine="Pyrofork 💥",
+        status_msg=status_msg,
     )
 
 
@@ -35,23 +36,25 @@ async def upload_file(file_path, real_name, is_last: bool = False, status_msg=No
 
     is_last     — when True the caption shows ✅ Done and the
                   progress status message is deleted afterwards.
-    status_msg  — optional dedicated status message to edit/delete
-                  (used for parallel FreeConvert jobs). Falls back
-                  to the global MSG.status_msg if not provided.
+    status_msg  — message Telegram à éditer pour la progression. Si None,
+                  utilise le MSG.status_msg global (comportement historique,
+                  pipeline leech normal). Les jobs FreeConvert concurrents
+                  passent leur propre message dédié pour ne pas se marcher
+                  dessus.
     """
     global Transfer, MSG
     BotTimes.task_start = datetime.now()
     target_msg = status_msg or MSG.status_msg
 
-    # Caption: clean name, or "✅ Done · name" on the final file
+    # Caption : nom propre, identique pour tous les fichiers (plus de "✅ Done ·" sur le dernier)
     name_part = f"{BOT.Setting.prefix} {real_name} {BOT.Setting.suffix}".strip()
-    if is_last:
-        caption = f"<{BOT.Options.caption}>✅ Done · {name_part}</{BOT.Options.caption}>"
-    else:
-        caption = f"<{BOT.Options.caption}>{name_part}</{BOT.Options.caption}>"
+    caption = f"<{BOT.Options.caption}>{name_part}</{BOT.Options.caption}>"
 
     type_  = fileType(file_path)
     f_type = type_ if BOT.Options.stream_upload else "document"
+
+    async def _progress(current, total):
+        await progress_bar(current, total, target_msg)
 
     try:
         if f_type == "video":
@@ -69,7 +72,7 @@ async def upload_file(file_path, real_name, is_last: bool = False, status_msg=No
                 thumb=thmb_path,   # petite vignette liste de chat (Telegram plafonne à 320px, hors de notre contrôle)
                 cover=thmb_path,   # preview grand format affichée à l'ouverture — pas de limite de résolution
                 duration=int(seconds),
-                progress=progress_bar,
+                progress=_progress,
             )
 
         elif f_type == "audio":
@@ -79,7 +82,7 @@ async def upload_file(file_path, real_name, is_last: bool = False, status_msg=No
                 audio=file_path,
                 caption=caption,
                 thumb=thmb_path,
-                progress=progress_bar,
+                progress=_progress,
             )
 
         elif f_type == "photo":
@@ -87,7 +90,7 @@ async def upload_file(file_path, real_name, is_last: bool = False, status_msg=No
                 chat_id=OWNER,
                 photo=file_path,
                 caption=caption,
-                progress=progress_bar,
+                progress=_progress,
             )
 
         else:  # document
@@ -102,7 +105,7 @@ async def upload_file(file_path, real_name, is_last: bool = False, status_msg=No
                 document=file_path,
                 caption=caption,
                 thumb=thmb_path,
-                progress=progress_bar,
+                progress=_progress,
             )
 
         MSG.sent_msg = sent
@@ -120,7 +123,7 @@ async def upload_file(file_path, real_name, is_last: bool = False, status_msg=No
     except FloodWait as e:
         logging.warning(f"FloodWait {e.value}s")
         await sleep(e.value)
-        await upload_file(file_path, real_name, is_last, status_msg)
+        await upload_file(file_path, real_name, is_last, status_msg=status_msg)
 
     except Exception as e:
         logging.exception(f"Upload error: {e}")
