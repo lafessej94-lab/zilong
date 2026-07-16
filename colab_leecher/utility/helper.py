@@ -31,7 +31,7 @@ def _speed_emoji(speed_str: str) -> str:
         try:
             value = float(speed_str.split()[0])
             if value >= 50:
-                return "⚡️"
+                return "⚡"
             if value >= 10:
                 return "🔥"
         except Exception:
@@ -358,10 +358,8 @@ def sysINFO():
     disk = psutil.disk_usage("/")
     cpu = psutil.cpu_percent()
     return (
-        "\n\n------------------\n"
-        f"🖥  CPU  <code>[{_pct_bar(cpu, 8)}]</code> <b>{cpu:.0f}%</b>\n"
-        f"💾  RAM  <code>{sizeUnit(ram)}</code>\n"
-        f"💿  Disk Free  <code>{sizeUnit(disk.free)}</code>"
+        "\n<code>———————————————</code>\n"
+        f"🖥 CPU {cpu:.0f}%   💾 RAM {sizeUnit(ram)}   💿 {sizeUnit(disk.free)} libres"
         f"{Messages.caution_msg}"
     )
 
@@ -374,21 +372,15 @@ async def status_bar(down_msg, speed, percentage, eta, done, left, engine, statu
     dessus. Si absent, comportement inchangé (pipeline normal single-task).
     """
     target_msg = status_msg or MSG.status_msg
-    bar = _pct_bar(float(percentage), 12)
-    s_ico = _speed_emoji(str(speed))
-    pct_f = float(percentage)
-    pct_str = f"<b>{pct_f:.1f}%</b>"
+    pct_f = max(0.0, min(float(percentage), 100.0))
+    bar = _pct_bar(pct_f, 16)
     elapsed = getTime((datetime.now() - BotTimes.start_time).seconds)
 
     text = (
-        f"\n<code>[{bar}]</code>  {pct_str}\n"
-        "------------------\n"
-        f"{s_ico}  <b>Speed</b>    <code>{speed}</code>\n"
-        f"⚙️  <b>Engine</b>   <code>{engine}</code>\n"
-        f"⏳  <b>ETA</b>      <code>{eta}</code>\n"
-        f"🕰  <b>Elapsed</b>  <code>{elapsed}</code>\n"
-        f"✅  <b>Done</b>     <code>{done}</code>\n"
-        f"📦  <b>Total</b>    <code>{left}</code>"
+        f"\n<code>[{bar}]</code>\n"
+        f"<code>{done} / {left}</code>   <b>{pct_f:.0f}%</b>\n\n"
+        f"⚡ <code>{speed}</code>   ⏳ <code>{eta}</code>\n"
+        f"🕐 <code>{elapsed}</code>   ⚙️ <code>{engine}</code>\n"
     )
     try:
         if isTimeOver():
@@ -406,44 +398,43 @@ async def status_bar(down_msg, speed, percentage, eta, done, left, engine, statu
 async def send_settings(client, message, msg_id, command: bool):
     up_mode = "document" if BOT.Options.stream_upload else "media"
     up_toggle = "📄 -> Media" if not BOT.Options.stream_upload else "🎞 -> Document"
-    pr = "-" if BOT.Setting.prefix == "" else f"<<{BOT.Setting.prefix}>>"
-    su = "-" if BOT.Setting.suffix == "" else f"<<{BOT.Setting.suffix}>>"
-    thmb = "✅ Set" if BOT.Setting.thumbnail else "❌ None"
-    cc_ready = "✅ Ready" if CC_API_KEY else "❌ Missing"
-    seedr_ready = "✅ Ready" if str(SEEDR_USERNAME or "").strip() and str(SEEDR_PASSWORD or "").strip() else "❌ Missing"
-    dump_ready = "✅ Ready" if str(DUMP_ID or "").strip() not in ("", "0") else "❌ Missing"
-    autofwd_toggle = "📨 AutoFwd ON" if BOT.Options.auto_forward else "📨 AutoFwd OFF"
+    pr = "—" if BOT.Setting.prefix == "" else BOT.Setting.prefix
+    su = "—" if BOT.Setting.suffix == "" else BOT.Setting.suffix
+    thmb = "✅ Définie" if BOT.Setting.thumbnail else "❌ Non définie"
+    cc_ready = "✅ Prête" if CC_API_KEY else "❌ Manquante"
+    seedr_ready = "✅ Prêt" if str(SEEDR_USERNAME or "").strip() and str(SEEDR_PASSWORD or "").strip() else "❌ Manquant"
+    dump_ready = "✅ Configuré" if str(DUMP_ID or "").strip() not in ("", "0") else "❌ Non configuré"
+    autofwd_toggle = "📨 Transfert : ON" if BOT.Options.auto_forward else "📨 Transfert : OFF"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(up_toggle, callback_data=up_mode),
-         InlineKeyboardButton("🎥 Video", callback_data="video")],
+         InlineKeyboardButton("🎥 Vidéo", callback_data="video")],
         [InlineKeyboardButton("☁️ CloudConvert", callback_data="cc"),
-         InlineKeyboardButton("🖼 Thumbnail", callback_data="thumb")],
+         InlineKeyboardButton("🖼 Miniature", callback_data="thumb")],
         [InlineKeyboardButton(autofwd_toggle, callback_data="autofwd"),
-         InlineKeyboardButton("✏️ Caption Font", callback_data="caption")],
-        [InlineKeyboardButton("⬅️ Prefix", callback_data="set-prefix"),
-         InlineKeyboardButton("Suffix ➡️", callback_data="set-suffix")],
-        [InlineKeyboardButton("✖️ Close", callback_data="close")],
+         InlineKeyboardButton("✏️ Légende", callback_data="caption")],
+        [InlineKeyboardButton("⬅️ Préfixe", callback_data="set-prefix"),
+         InlineKeyboardButton("Suffixe ➡️", callback_data="set-suffix")],
+        [InlineKeyboardButton("✖ Fermer", callback_data="close")],
     ])
 
     text = (
-        "⚙️ <b>BOT SETTINGS</b>\n"
-        "------------------\n\n"
-        f"📤  Upload    <code>{BOT.Setting.stream_upload}</code>\n"
-        f"✂️  Split     <code>{BOT.Setting.split_video}</code>\n"
-        f"🔄  Convert   <code>{BOT.Setting.convert_video}</code>\n"
-        f"☁️  CC Mode   <code>{cc_mode_label(BOT.Options.cc_engine_mode)}</code>\n"
-        f"🎚  CC Preset <code>{quality_label(BOT.Options.cc_quality_profile)}</code>\n"
-        f"📐  CC Resize <code>{resize_label(BOT.Options.cc_resize)}</code>\n"
-        f"🗜  CC Target <code>{BOT.Setting.cc_target_size}</code>\n"
-        f"🔑  CC API    <code>{cc_ready}</code>\n"
-        f"🧲  Seedr     <code>{seedr_ready}</code>\n"
-        f"📨  AutoFwd  <code>{BOT.Setting.auto_forward}</code>\n"
-        f"📦  Dump ID   <code>{dump_ready}</code>\n"
-        f"✏️  Caption   <code>{BOT.Setting.caption}</code>\n"
-        f"⬅️  Prefix    <code>{pr}</code>\n"
-        f"➡️  Suffix    <code>{su}</code>\n"
-        f"🖼  Thumbnail {thmb}"
+        "⚙️ <b>Réglages du bot</b>\n\n"
+        "<b>🎬 Vidéo</b>\n"
+        f"Conversion       <code>{BOT.Setting.convert_video}</code>\n"
+        f"Découpage        <code>{BOT.Setting.split_video}</code>\n\n"
+        "<b>☁️ CloudConvert</b>\n"
+        f"Mode · Preset    <code>{cc_mode_label(BOT.Options.cc_engine_mode)} · {quality_label(BOT.Options.cc_quality_profile)}</code>\n"
+        f"Resize · Cible   <code>{resize_label(BOT.Options.cc_resize)} · {BOT.Setting.cc_target_size}</code>\n"
+        f"Clé API          {cc_ready}\n\n"
+        "<b>🔌 Intégrations</b>\n"
+        f"Seedr            {seedr_ready}\n"
+        f"Transfert auto   <code>{BOT.Setting.auto_forward}</code>\n"
+        f"Canal dump       {dump_ready}\n\n"
+        "<b>📤 Upload</b>\n"
+        f"Légende          <code>{BOT.Setting.caption}</code>\n"
+        f"Préfixe · Suffixe <code>{pr} · {su}</code>\n"
+        f"Miniature        {thmb}"
     )
     try:
         if command:
