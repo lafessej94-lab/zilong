@@ -38,7 +38,13 @@ from colab_leecher.stream_extractor import (
 )
 
 
-BOT.Options.auto_forward = str(DUMP_ID or "").strip() not in ("", "0")
+_initial_dump = str(DUMP_ID or "").strip()
+if _initial_dump not in ("", "0"):
+    try:
+        BOT.Options.dump_ids = [int(_initial_dump)]
+    except ValueError:
+        BOT.Options.dump_ids = [_initial_dump]
+BOT.Options.auto_forward = bool(BOT.Options.dump_ids)
 BOT.Setting.auto_forward = "On" if BOT.Options.auto_forward else "Off"
 
 # ── État en mémoire pour le hardsub FreeConvert concurrent ──────────────────
@@ -233,7 +239,9 @@ async def help_cmd(client, message):
         "  /cancel    — cancel running task\n"
         "  /stop      — shutdown bot\n"
         "  /setname   — custom filename\n"
-        "  /rename    — rename after download\n\n"
+        "  /rename    — rename after download\n"
+        "  /add       — add a dump channel\n"
+        "  /dumps     — list/remove dump channels\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📡 <b>Nyaa Anime Search</b>\n"
         "  /nyaa_search <query> — search Nyaa.si\n"
@@ -526,6 +534,77 @@ async def unzip_pswd(client, message):
         BOT.Options.unzip_pswd = message.command[1]
         msg = await message.reply_text("✅ Unzip password set 🔓", quote=True)
     await sleep(15); await message_deleter(message, msg)
+
+
+def _dumps_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for cid in BOT.Options.dump_ids:
+        rows.append([InlineKeyboardButton(f"🗑 {cid}", callback_data=f"dump_remove|{cid}")])
+    rows.append([InlineKeyboardButton("⏎ Back", callback_data="back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _dumps_text() -> str:
+    if not BOT.Options.dump_ids:
+        return (
+            "📦 <b>CANAUX DUMP</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Aucun canal configuré.\n\n"
+            "Ajoute-en un avec :\n"
+            "<code>/add @mon_channel</code>\n"
+            "<code>/add -1001234567890</code>"
+        )
+    lines = "\n".join(f"· <code>{cid}</code>" for cid in BOT.Options.dump_ids)
+    return (
+        "📦 <b>CANAUX DUMP</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{lines}\n\n"
+        "Ajoute-en un autre avec <code>/add @channel</code>\n"
+        "Tape sur 🗑 pour en retirer un."
+    )
+
+
+@colab_bot.on_message(filters.command("add") & filters.private)
+async def add_dump_cmd(client, message):
+    if not _owner(message): return
+    await message.delete()
+    if len(message.command) != 2:
+        msg = await message.reply_text(
+            "Usage: <code>/add @channel</code> ou <code>/add -1001234567890</code>",
+            quote=True,
+        )
+        await sleep(10); await msg.delete()
+        return
+
+    target = message.command[1].strip()
+    try:
+        chat = await client.get_chat(target)
+        chat_id = chat.id
+        title = chat.title or chat.first_name or str(chat_id)
+    except Exception as exc:
+        msg = await message.reply_text(
+            f"❌ Impossible de trouver <code>{target}</code>\n<code>{exc}</code>",
+            quote=True,
+        )
+        await sleep(10); await msg.delete()
+        return
+
+    if chat_id in BOT.Options.dump_ids:
+        msg = await message.reply_text(f"⚠️ <b>{title}</b> est déjà dans la liste.", quote=True)
+    else:
+        BOT.Options.dump_ids.append(chat_id)
+        BOT.Options.auto_forward = True
+        BOT.Setting.auto_forward = "On"
+        msg = await message.reply_text(
+            f"✅ Canal ajouté : <b>{title}</b>\n<code>{chat_id}</code>",
+            quote=True,
+        )
+    await sleep(10); await msg.delete()
+
+
+@colab_bot.on_message(filters.command("dumps") & filters.private)
+async def dumps_cmd(client, message):
+    if not _owner(message): return
+    await message.delete()
+    await message.reply_text(_dumps_text(), reply_markup=_dumps_kb())
 
 
 @colab_bot.on_message(filters.reply & filters.private)
@@ -1121,13 +1200,30 @@ async def callbacks(client, cq):
         await cq.answer(BOT.Setting.cc_target_size, show_alert=True)
         await send_settings(client, cq.message, cq.message.id, False)
     elif data == "autofwd":
-        if str(DUMP_ID or "").strip() in ("", "0"):
-            await cq.answer("Set DUMP_ID first in Colab to use autoforward.", show_alert=True)
+        if not BOT.Options.dump_ids:
+            await cq.answer("Ajoute d'abord un canal avec /add @channel", show_alert=True)
         else:
             BOT.Options.auto_forward = not BOT.Options.auto_forward
             BOT.Setting.auto_forward = "On" if BOT.Options.auto_forward else "Off"
             await cq.answer(f"AutoFwd {BOT.Setting.auto_forward}", show_alert=True)
             await send_settings(client, cq.message, cq.message.id, False)
+    elif data == "dumps":
+        await cq.message.edit_text(_dumps_text(), reply_markup=_dumps_kb())
+    elif data.startswith("dump_remove|"):
+        raw_id = data.split("|", 1)[1]
+        try:
+            target = int(raw_id)
+        except ValueError:
+            target = raw_id
+        if target in BOT.Options.dump_ids:
+            BOT.Options.dump_ids.remove(target)
+            if not BOT.Options.dump_ids:
+                BOT.Options.auto_forward = False
+                BOT.Setting.auto_forward = "Off"
+            await cq.answer("🗑 Retiré")
+        else:
+            await cq.answer("Déjà retiré.")
+        await cq.message.edit_text(_dumps_text(), reply_markup=_dumps_kb())
     elif data in ["media","document"]:
         BOT.Options.stream_upload = data == "media"
         BOT.Setting.stream_upload = "Media" if data == "media" else "Document"
