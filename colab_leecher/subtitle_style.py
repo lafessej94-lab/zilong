@@ -20,20 +20,20 @@ from os import path as ospath
 @dataclass(frozen=True)
 class AssStyle:
     fontname: str = "Trebuchet MS"
-    fontsize: int = 23
+    fontsize: int = 22
     primary_colour: str = "&H00FFFFFF"   # blanc pur (format ASS: &HAABBGGRR)
     secondary_colour: str = "&H000000FF"
     outline_colour: str = "&H00000000"   # contour noir
-    back_colour: str = "&H00000000"      # pas d'ombre (Shadow=0 ci-dessous)
+    back_colour: str = "&H00000000"      # couleur de l'ombre portée (ASS l'utilise aussi comme back-color de la boîte en BorderStyle=3)
     bold: int = -1                       # -1 = gras activé en ASS (0 = désactivé)
     italic: int = 0
     border_style: int = 1                # 1 = contour + ombre, 3 = boîte pleine
-    outline: float = 2.5
-    shadow: float = 0
+    outline: float = 1
+    shadow: float = 1
     alignment: int = 2                   # 2 = bas centré (numpad ASS)
-    margin_l: int = 20
-    margin_r: int = 20
-    margin_v: int = 20
+    margin_l: int = 2
+    margin_r: int = 2
+    margin_v: int = 25
 
 
 # Style par défaut : repris tel quel du style "Default" fourni par l'utilisateur
