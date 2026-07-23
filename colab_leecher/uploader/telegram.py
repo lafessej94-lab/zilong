@@ -4,7 +4,7 @@ from asyncio import sleep
 from os import path as ospath
 from datetime import datetime
 from pyrogram.errors import FloodWait
-from colab_leecher import DUMP_ID, colab_bot, OWNER
+from colab_leecher import colab_bot, OWNER
 from colab_leecher.utility.variables import BOT, Transfer, BotTimes, Messages, MSG, Paths
 from colab_leecher.utility.helper import (
     sizeUnit, fileType, getTime, status_bar, thumbMaintainer, videoExtFix,
@@ -131,18 +131,25 @@ async def upload_file(file_path, real_name, is_last: bool = False, status_msg=No
 
 
 async def maybe_autoforward(message) -> None:
-    dump_target = str(DUMP_ID or "").strip()
-    if not BOT.Options.auto_forward or dump_target in ("", "0"):
+    if not BOT.Options.auto_forward or not BOT.Options.dump_ids:
         return
+    for dump_target in list(BOT.Options.dump_ids):
+        await _forward_to(message, dump_target)
+
+
+async def _forward_to(message, dump_target, retries: int = 0) -> None:
     try:
         await colab_bot.copy_message(
-            chat_id=int(dump_target),
+            chat_id=dump_target,
             from_chat_id=OWNER,
             message_id=message.id,
         )
     except FloodWait as e:
-        logging.warning(f"Autoforward FloodWait {e.value}s")
+        if retries >= 3:
+            logging.warning(f"Autoforward to {dump_target} gave up after {retries} FloodWaits")
+            return
+        logging.warning(f"Autoforward FloodWait {e.value}s (target {dump_target})")
         await sleep(e.value)
-        await maybe_autoforward(message)
+        await _forward_to(message, dump_target, retries + 1)
     except Exception as exc:
-        logging.warning(f"Autoforward skipped: {exc}")
+        logging.warning(f"Autoforward to {dump_target} skipped: {exc}")
