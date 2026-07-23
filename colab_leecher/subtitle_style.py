@@ -148,6 +148,18 @@ def apply_hardsub_style(
     for line in lines:
         stripped = line.strip()
 
+        # On force PlayResX/PlayResY à notre résolution de référence, quelle
+        # que soit celle déclarée par la source. Sans ça, un fichier calibré
+        # nativement en 1920x1080 (ex: Tsundere Raws) fait apparaître notre
+        # fontsize (calibré pour 640x360) minuscule à l'écran, puisque ASS
+        # calcule la taille du texte proportionnellement au PlayRes déclaré.
+        if stripped.lower().startswith("playresx:"):
+            out_lines.append(f"PlayResX: {PLAY_RES_X}\n")
+            continue
+        if stripped.lower().startswith("playresy:"):
+            out_lines.append(f"PlayResY: {PLAY_RES_Y}\n")
+            continue
+
         if stripped.lower() in ("[v4+ styles]", "[v4 styles]"):
             in_styles_section = True
             out_lines.append("[V4+ Styles]\n")
