@@ -36,6 +36,7 @@ class BOT:
         custom_name = ""
         zip_pswd = ""
         unzip_pswd = ""
+        dump_ids = []  # liste de chat_id (int) — canaux dump, gérés via /add et /dumps
 
     class Mode:
         mode = "leech"
