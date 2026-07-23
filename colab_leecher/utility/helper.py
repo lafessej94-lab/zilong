@@ -14,7 +14,7 @@ from PIL import Image
 from pyrogram.errors import BadRequest
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 
-from colab_leecher import CC_API_KEY, DUMP_ID, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot
+from colab_leecher import CC_API_KEY, SEEDR_PASSWORD, SEEDR_USERNAME, colab_bot
 from colab_leecher.cloudconvert import cc_mode_label, quality_label, resize_label
 from colab_leecher.utility.variables import BOT, MSG, BotTimes, Messages, Paths
 
@@ -403,7 +403,8 @@ async def send_settings(client, message, msg_id, command: bool):
     thmb = "✅ Définie" if BOT.Setting.thumbnail else "❌ Non définie"
     cc_ready = "✅ Prête" if CC_API_KEY else "❌ Manquante"
     seedr_ready = "✅ Prêt" if str(SEEDR_USERNAME or "").strip() and str(SEEDR_PASSWORD or "").strip() else "❌ Manquant"
-    dump_ready = "✅ Configuré" if str(DUMP_ID or "").strip() not in ("", "0") else "❌ Non configuré"
+    n_dumps = len(BOT.Options.dump_ids)
+    dump_status = f"✅ {n_dumps} configuré(s)" if n_dumps else "❌ Aucun"
     autofwd_toggle = "📨 Transfert : ON" if BOT.Options.auto_forward else "📨 Transfert : OFF"
 
     kb = InlineKeyboardMarkup([
@@ -412,7 +413,8 @@ async def send_settings(client, message, msg_id, command: bool):
         [InlineKeyboardButton("☁️ CloudConvert", callback_data="cc"),
          InlineKeyboardButton("🖼 Miniature", callback_data="thumb")],
         [InlineKeyboardButton(autofwd_toggle, callback_data="autofwd"),
-         InlineKeyboardButton("✏️ Légende", callback_data="caption")],
+         InlineKeyboardButton("📦 Dumps", callback_data="dumps")],
+        [InlineKeyboardButton("✏️ Légende", callback_data="caption")],
         [InlineKeyboardButton("⬅️ Préfixe", callback_data="set-prefix"),
          InlineKeyboardButton("Suffixe ➡️", callback_data="set-suffix")],
         [InlineKeyboardButton("✖ Fermer", callback_data="close")],
@@ -430,7 +432,7 @@ async def send_settings(client, message, msg_id, command: bool):
         "<b>🔌 Intégrations</b>\n"
         f"Seedr            {seedr_ready}\n"
         f"Transfert auto   <code>{BOT.Setting.auto_forward}</code>\n"
-        f"Canal dump       {dump_ready}\n\n"
+        f"Canaux dump      {dump_status}\n\n"
         "<b>📤 Upload</b>\n"
         f"Légende          <code>{BOT.Setting.caption}</code>\n"
         f"Préfixe · Suffixe <code>{pr} · {su}</code>\n"
