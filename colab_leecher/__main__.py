@@ -174,7 +174,8 @@ async def _startup_welcome() -> None:
                 f"👋 <b>Welcome back, {display}</b>\n"
                 "⚡ <b>Zilong is online</b>\n\n"
                 "Send a link, magnet, or path to begin.\n"
-                "Use /start for the full menu and /status for the live dashboard."
+                "LES SERVICES DE CE BOT NE SERONT PLUS DISPONIBLE LE 30 Aout 2025
+                Veillez passer a la VERSION MYUU, Contacter @Deathkun."
             )
             await colab_bot.send_message(chat_id=OWNER, text=text)
             return
