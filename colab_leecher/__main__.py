@@ -171,11 +171,10 @@ async def _startup_welcome() -> None:
             first = owner.first_name or owner.username or str(OWNER)
             display = first.replace("<", "&lt;").replace(">", "&gt;")
             text = (
-                f"👋 <b>Welcome back, {display}</b>\n"
-                "⚡ <b>Zilong is online</b>\n\n"
+                f"👋 <b>Heyo back, {display}</b>\n"
+                "💖 <b>Myuu࣪ ☾ is online</b>\n\n"
                 "Send a link, magnet, or path to begin.\n"
-                "LES SERVICES DE CE BOT NE SERONT PLUS DISPONIBLE LE 30 Aout 2025
-                Veillez passer a la VERSION MYUU, Contacter @Deathkun."
+                "Use /start for the full menu and /status for the live dashboard."
             )
             await colab_bot.send_message(chat_id=OWNER, text=text)
             return
